@@ -16,11 +16,12 @@ from .qr_server import qr_state
 class BridgeManager:
     """Manages the Node.js WhatsApp bridge process lifecycle."""
 
-    def __init__(self, bridge_dir: str, port: int, auth_dir: str, token: str = ""):
+    def __init__(self, bridge_dir: str, port: int, auth_dir: str, token: str = "", rate_limit: int = 30):
         self.bridge_dir = Path(bridge_dir)
         self.port = port
         self.auth_dir = auth_dir
         self.token = token
+        self.rate_limit = rate_limit
         self._process: subprocess.Popen | None = None
         self._running = False
         self._thread: threading.Thread | None = None
@@ -81,6 +82,7 @@ class BridgeManager:
         env = os.environ.copy()
         env["BRIDGE_PORT"] = str(self.port)
         env["AUTH_DIR"] = self.auth_dir
+        env["RATE_LIMIT_PER_MINUTE"] = str(self.rate_limit)
         if self.token:
             env["BRIDGE_TOKEN"] = self.token
 

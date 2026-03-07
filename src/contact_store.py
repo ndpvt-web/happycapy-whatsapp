@@ -10,6 +10,7 @@ Profiles are generated/updated by LLM analysis of conversation samples.
 Injected into system prompt for personalized, context-aware replies.
 """
 
+import asyncio
 import json
 import os
 import sqlite3
@@ -58,6 +59,10 @@ class ContactStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path))
         self._conn.row_factory = sqlite3.Row
+        # Asyncio lock serializes writes from concurrent tasks (e.g., store_sample
+        # from multiple contact handlers + background generate_profile).
+        # SQLite allows concurrent reads but writes must be serialized.
+        self._write_lock = asyncio.Lock()
         self._init_db()
 
     def _init_db(self) -> None:
@@ -93,17 +98,21 @@ class ContactStore:
         """)
         self._conn.commit()
 
-    def store_sample(self, jid: str, role: str, content: str, timestamp: str = "") -> None:
-        """Store a conversation sample for future profile analysis."""
+    async def store_sample(self, jid: str, role: str, content: str, timestamp: str = "") -> None:
+        """Store a conversation sample for future profile analysis.
+
+        Uses _write_lock to serialize SQLite writes across concurrent asyncio tasks.
+        """
         if not content or len(content.strip()) < 2:
             return
 
         ts = timestamp or datetime.now().isoformat()
-        self._conn.execute(
-            "INSERT INTO conversation_samples (jid, role, content, timestamp) VALUES (?, ?, ?, ?)",
-            (jid, role, content[:2000], ts),
-        )
-        self._conn.commit()
+        async with self._write_lock:
+            self._conn.execute(
+                "INSERT INTO conversation_samples (jid, role, content, timestamp) VALUES (?, ?, ?, ?)",
+                (jid, role, content[:2000], ts),
+            )
+            self._conn.commit()
 
     def get_sample_count(self, jid: str) -> int:
         """Get number of stored samples for a contact."""
@@ -138,21 +147,22 @@ class ContactStore:
         except (json.JSONDecodeError, TypeError):
             return ContactProfile(jid=jid)
 
-    def save_profile(self, profile: ContactProfile) -> None:
-        """Save or update a contact profile."""
+    async def save_profile(self, profile: ContactProfile) -> None:
+        """Save or update a contact profile (write-locked for async safety)."""
         profile.last_updated = datetime.now().isoformat()
         profile_json = json.dumps(asdict(profile), default=str)
 
-        self._conn.execute("""
-            INSERT INTO contact_profiles (jid, display_name, profile_json, total_messages_analyzed, updated_at)
-            VALUES (?, ?, ?, ?, datetime('now'))
-            ON CONFLICT(jid) DO UPDATE SET
-                display_name = excluded.display_name,
-                profile_json = excluded.profile_json,
-                total_messages_analyzed = excluded.total_messages_analyzed,
-                updated_at = datetime('now')
-        """, (profile.jid, profile.display_name, profile_json, profile.total_messages_analyzed))
-        self._conn.commit()
+        async with self._write_lock:
+            self._conn.execute("""
+                INSERT INTO contact_profiles (jid, display_name, profile_json, total_messages_analyzed, updated_at)
+                VALUES (?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(jid) DO UPDATE SET
+                    display_name = excluded.display_name,
+                    profile_json = excluded.profile_json,
+                    total_messages_analyzed = excluded.total_messages_analyzed,
+                    updated_at = datetime('now')
+            """, (profile.jid, profile.display_name, profile_json, profile.total_messages_analyzed))
+            self._conn.commit()
 
     def needs_profile_update(self, jid: str) -> bool:
         """Check if a contact needs profile generation/update."""
@@ -262,14 +272,15 @@ Return ONLY valid JSON, no markdown or explanation."""
                         total_messages_analyzed=self.get_sample_count(jid),
                         profile_version=(existing.profile_version + 1) if existing else 1,
                     )
-                    self.save_profile(profile)
+                    await self.save_profile(profile)
 
-                    # Log change
-                    self._conn.execute(
-                        "INSERT INTO profile_changelog (jid, change_summary) VALUES (?, ?)",
-                        (jid, f"Profile v{profile.profile_version}: {profile.summary[:200]}"),
-                    )
-                    self._conn.commit()
+                    # Log change (under write lock)
+                    async with self._write_lock:
+                        self._conn.execute(
+                            "INSERT INTO profile_changelog (jid, change_summary) VALUES (?, ?)",
+                            (jid, f"Profile v{profile.profile_version}: {profile.summary[:200]}"),
+                        )
+                        self._conn.commit()
 
                     print(f"Profile updated for {jid}: {profile.display_name or 'unnamed'} ({profile.relationship})")
                     return profile

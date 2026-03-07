@@ -26,10 +26,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "auth_dir": str(Path.home() / ".happycapy-whatsapp" / "whatsapp-auth"),
     "log_level": "INFO",
     "system_prompt_override": "",
+    "bridge_token": "",
     "ai_gateway_url": "https://ai-gateway.happycapy.ai/api/v1",
     "ai_model": "claude-sonnet-4-6",
     "max_message_length": 4000,
     "rate_limit_per_minute": 30,
+    "media_max_age_hours": 24,
+    "whisper_api_url": "https://api.groq.com/openai/v1/audio/transcriptions",
 }
 
 # Environment variable overrides (Theorem T4)
@@ -37,10 +40,12 @@ ENV_OVERRIDES: dict[str, tuple[str, type]] = {
     "WHATSAPP_BRIDGE_PORT": ("bridge_port", int),
     "WHATSAPP_QR_PORT": ("qr_server_port", int),
     "WHATSAPP_AUTH_DIR": ("auth_dir", str),
+    "WHATSAPP_BRIDGE_TOKEN": ("bridge_token", str),
     "WHATSAPP_MODE": ("mode", str),
     "WHATSAPP_LOG_LEVEL": ("log_level", str),
     "AI_GATEWAY_URL": ("ai_gateway_url", str),
     "AI_MODEL": ("ai_model", str),
+    "WHISPER_API_URL": ("whisper_api_url", str),
 }
 
 CONFIG_DIR = Path.home() / ".happycapy-whatsapp"
@@ -71,8 +76,8 @@ def load_config() -> dict[str, Any]:
         if val is not None:
             try:
                 config[config_key] = cast(val)
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as e:
+                print(f"Warning: invalid {env_var}={val!r} (expected {cast.__name__}): {e}")
 
     return config
 

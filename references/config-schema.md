@@ -24,7 +24,10 @@ All configuration is stored at `~/.happycapy-whatsapp/config.json`.
 | `ai_gateway_url` | string | `"https://ai-gateway.happycapy.ai/api/v1"` | AI Gateway base URL |
 | `ai_model` | string | `"claude-sonnet-4-6"` | AI model for generating responses |
 | `max_message_length` | integer | `4000` | Max chars per WhatsApp message chunk |
-| `rate_limit_per_minute` | integer | `30` | Max outbound messages per minute |
+| `rate_limit_per_minute` | integer | `30` | Max outbound messages per minute (flows to bridge via env) |
+| `media_max_age_hours` | integer | `24` | Hours to keep downloaded media before cleanup (0 = forever) |
+| `bridge_token` | string | `""` | Optional token for WebSocket auth between Python and bridge |
+| `whisper_api_url` | string | `"https://api.groq.com/openai/v1/audio/transcriptions"` | Voice transcription API endpoint |
 | `profile_model` | string | (uses `ai_model`) | AI model for contact profile generation (defaults to ai_model) |
 
 ## Environment Variable Overrides
@@ -34,10 +37,12 @@ All configuration is stored at `~/.happycapy-whatsapp/config.json`.
 | `WHATSAPP_BRIDGE_PORT` | `bridge_port` | int |
 | `WHATSAPP_QR_PORT` | `qr_server_port` | int |
 | `WHATSAPP_AUTH_DIR` | `auth_dir` | string |
+| `WHATSAPP_BRIDGE_TOKEN` | `bridge_token` | string |
 | `WHATSAPP_MODE` | `mode` | string |
 | `WHATSAPP_LOG_LEVEL` | `log_level` | string |
 | `AI_GATEWAY_URL` | `ai_gateway_url` | string |
 | `AI_MODEL` | `ai_model` | string |
+| `WHISPER_API_URL` | `whisper_api_url` | string |
 
 Environment variables always take precedence over config file values.
 
@@ -88,4 +93,57 @@ Profiles stored in `contacts.db` include:
 2. **Bridge binds to 127.0.0.1** - never externally accessible
 3. **Port 3001 is reserved** - cannot be used for bridge or QR server
 4. **AI reasoning is stripped** - internal notes never reach WhatsApp contacts
-5. **Rate limiting** - max 30 messages per minute to prevent spam
+5. **Rate limiting** - configurable via `rate_limit_per_minute` (default 30), enforced in Node.js bridge
+6. **Media cleanup** - automatic removal of files older than `media_max_age_hours` on startup
+
+## Aristotelian Proofs for Constants
+
+Every hardcoded constant derives from first-principle premises. No arbitrary "magic numbers".
+
+### Atomic Premises
+
+| ID | Premise |
+|----|---------|
+| P1 | WhatsApp Web requires QR code scanning for initial pairing |
+| P2 | Baileys emits QR as string convertible to PNG |
+| P3 | Session state persists in multi-file auth directory |
+| P4 | Users cannot know config needs without being asked |
+| P5 | Every config value must have a sensible default |
+| P6 | Terminal QR is unusable in sandboxed environments |
+| P7 | Setup must happen before runtime operation |
+| P8 | Auto-replies to groups are dangerous without consent |
+| P9 | Port 3001 is reserved in HappyCapy |
+| P10 | Skills live at `~/.claude/skills/<name>/` with SKILL.md |
+| P11 | `AskUserQuestion` captures user input interactively |
+| P12 | `/app/export-port.sh` exposes ports externally |
+| P_DEDUP | WhatsApp delivers retries on reconnect; dedup prevents double-processing |
+| P_SENT | Track outbound message keys for delete/status correlation |
+| P_BAN | WhatsApp bans accounts at ~200 messages/minute |
+| P_DISK | Media files accumulate at rate proportional to incoming messages |
+
+### Theorems (Design Decisions)
+
+| ID | Theorem | Derived From | Constant |
+|----|---------|--------------|----------|
+| T1 | QR must be served as web page with base64 PNG | P1 + P6 + P12 | `qr_server_port: 8765` |
+| T2 | QR server must auto-refresh every 2s via JavaScript | P2 + P6 | Polling interval in qr_server.py |
+| T3 | Interactive setup wizard runs BEFORE bridge starts | P4 + P7 + P11 | Setup flow in main.py |
+| T4 | All config stored in JSON file + env overrides, no hardcoding | P5 + P10 | config_manager.py ENV_OVERRIDES |
+| T5 | Bridge on internal port, QR server on exposed port | P9 + P12 | `bridge_port: 3002` |
+| T6 | Groups NEVER auto-replied to | P8 | `group_policy: monitor` |
+| T7 | Config file persists so setup wizard only runs once | P3 + P5 | `config_exists()` check |
+
+### Constants with Proofs
+
+| Constant | Value | Proof |
+|----------|-------|-------|
+| `_DEDUP_MAX` | 1000 | P_DEDUP: 1000 IDs x ~50B = ~50KB. At 30 msg/min, covers ~33 min of history. |
+| `_DEDUP_EVICT_BATCH` | 100 | Evict oldest 10% when full = amortized O(1) per insert. |
+| `_SENT_KEYS_MAX` | 500 | P_SENT: ~16 min at max send rate; outbound needs less history than inbound. |
+| `rate_limit_per_minute` | 30 | P_BAN: 30 = 15% of WhatsApp ban threshold (200/min). Safe margin. |
+| `media_max_age_hours` | 24 | P_DISK: 24h keeps recent context while bounding disk to ~1 day of media. |
+| `max_message_length` | 4000 | WhatsApp renders poorly above ~4000 chars. Split at line/word boundaries. |
+| `MAX_RESTARTS` (daemon) | 50 | Exponential backoff: 50 restarts x avg 60s = ~50min before giving up. Covers transient network outages. |
+| `STABILITY_THRESHOLD` (daemon) | 300s | 5 min of stable run = process is healthy, reset restart counter. |
+| `MIN_SAMPLES_FOR_PROFILE` | 5 | Minimum messages for statistically meaningful style analysis. |
+| `PROFILE_UPDATE_INTERVAL` | 20 | 20 new messages = enough new data to justify re-analysis cost. |

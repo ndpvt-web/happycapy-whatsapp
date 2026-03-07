@@ -36,8 +36,13 @@ export class BridgeServer {
   private clients: Set<WebSocket> = new Set();
   private sendCount = 0;
   private sendCountReset: NodeJS.Timeout | null = null;
+  private rateLimit: number;
 
-  constructor(private port: number, private authDir: string, private token?: string) {}
+  constructor(private port: number, private authDir: string, private token?: string) {
+    // Rate limit from env (set by Python config) or default 30.
+    // Proof: WhatsApp bans at ~200 msg/min. 30 = 15% of ban threshold = safe margin.
+    this.rateLimit = parseInt(process.env.RATE_LIMIT_PER_MINUTE || '30', 10) || 30;
+  }
 
   async start(): Promise<void> {
     this.wss = new WebSocketServer({ host: '127.0.0.1', port: this.port });
@@ -115,8 +120,8 @@ export class BridgeServer {
   private async handleCommand(cmd: any): Promise<Record<string, unknown>> {
     if (cmd.type === 'send' && this.wa) {
       // Rate limiting
-      if (this.sendCount >= 30) {
-        throw new Error('Rate limit exceeded: 30 messages per minute');
+      if (this.sendCount >= this.rateLimit) {
+        throw new Error(`Rate limit exceeded: ${this.rateLimit} messages per minute`);
       }
 
       // Block group sends

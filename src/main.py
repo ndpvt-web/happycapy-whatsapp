@@ -280,6 +280,7 @@ class WhatsAppOrchestrator:
             port=self.config.get("bridge_port", 3002),
             auth_dir=auth_dir,
             token=self.config.get("bridge_token", ""),
+            rate_limit=self.config.get("rate_limit_per_minute", 30),
         )
         self.bridge.start()
         print("Bridge manager started")
@@ -316,11 +317,10 @@ class WhatsAppOrchestrator:
         - Messages from the SAME contact are processed sequentially (preserving order)
         This prevents contact B from waiting for contact A's AI response.
         """
-        # Get or create per-contact lock
-        if chat_id not in self._contact_locks:
-            self._contact_locks[chat_id] = asyncio.Lock()
+        # Atomic get-or-create per-contact lock (setdefault is atomic in CPython)
+        lock = self._contact_locks.setdefault(chat_id, asyncio.Lock())
 
-        async with self._contact_locks[chat_id]:
+        async with lock:
             await self._process_message(sender_id, chat_id, content, media_paths, metadata)
 
     async def _process_message(
@@ -333,7 +333,7 @@ class WhatsAppOrchestrator:
 
         # Store conversation sample for contact profiling
         if self.contact_store:
-            self.contact_store.store_sample(sender_id, "user", content)
+            await self.contact_store.store_sample(sender_id, "user", content)
 
         if mode == "monitor_only":
             return
@@ -382,7 +382,7 @@ class WhatsAppOrchestrator:
 
             # Store assistant sample too
             if self.contact_store:
-                self.contact_store.store_sample(sender_id, "assistant", response)
+                await self.contact_store.store_sample(sender_id, "assistant", response)
 
         # Check if contact profile needs generation/update (async, non-blocking)
         if self.contact_store and self.contact_store.needs_profile_update(sender_id):
@@ -422,6 +422,15 @@ class WhatsAppOrchestrator:
 
         print(f"\nScan the QR code at: {qr_url}")
         print("Waiting for WhatsApp connection...\n")
+
+        # Media cleanup on startup (remove files older than configured max age)
+        # Proof: Without cleanup, media dir grows unbounded at O(messages).
+        # Default 24h = keeps recent context while bounding disk to ~1 day of media.
+        from src.whatsapp_channel import WhatsAppChannel as _WC
+        temp_channel = _WC(config=self.config)
+        removed = temp_channel.cleanup_media()
+        if removed:
+            print(f"Startup media cleanup: removed {removed} expired files")
 
         # Start channel
         self.channel = WhatsAppChannel(

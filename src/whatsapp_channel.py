@@ -42,6 +42,15 @@ class WhatsAppChannel:
         r"[\s\S]*$",
     )
 
+    # ── Constants with Aristotelian proofs ──
+    # P_DEDUP: WhatsApp delivers retries on reconnect; dedup prevents double-processing.
+    # 1000 IDs * ~50 bytes = ~50KB. At 30 msg/min max rate, covers ~33 min of history.
+    _DEDUP_MAX = 1000
+    _DEDUP_EVICT_BATCH = 100  # Evict oldest 10% when full (amortized O(1) per insert)
+    # P_SENT: Track outbound message keys for delete/status correlation.
+    # 500 = ~16 min at max send rate; outbound needs less history than inbound.
+    _SENT_KEYS_MAX = 500
+
     def __init__(self, config: dict[str, Any], on_message=None):
         self.config = config
         self.on_message = on_message  # async callback(sender_id, chat_id, content, media_paths, metadata)
@@ -49,7 +58,6 @@ class WhatsAppChannel:
         self._connected = False
         self._running = False
         self._seen_ids: dict[str, float] = {}
-        self._DEDUP_MAX = 1000
         self._sent_keys: dict[str, dict] = {}
         self._reconnect_attempts = 0
 
@@ -201,7 +209,7 @@ class WhatsAppChannel:
             if msg_id:
                 self._seen_ids[msg_id] = time.time()
                 if len(self._seen_ids) > self._DEDUP_MAX:
-                    oldest = sorted(self._seen_ids, key=self._seen_ids.get)[:100]
+                    oldest = sorted(self._seen_ids, key=self._seen_ids.get)[:self._DEDUP_EVICT_BATCH]
                     for k in oldest:
                         del self._seen_ids[k]
 
@@ -306,8 +314,8 @@ class WhatsAppChannel:
                     "id": msg_id,
                     "to": data.get("to", ""),
                 }
-                if len(self._sent_keys) > 500:
-                    keys_to_remove = list(self._sent_keys.keys())[:len(self._sent_keys) - 500]
+                if len(self._sent_keys) > self._SENT_KEYS_MAX:
+                    keys_to_remove = list(self._sent_keys.keys())[:len(self._sent_keys) - self._SENT_KEYS_MAX]
                     for k in keys_to_remove:
                         del self._sent_keys[k]
 
@@ -337,10 +345,13 @@ class WhatsAppChannel:
             if not httpx:
                 return None
 
+            whisper_url = self.config.get(
+                "whisper_api_url", "https://api.groq.com/openai/v1/audio/transcriptions"
+            )
             async with httpx.AsyncClient() as client:
                 with open(file_path, "rb") as f:
                     resp = await client.post(
-                        "https://api.groq.com/openai/v1/audio/transcriptions",
+                        whisper_url,
                         headers={"Authorization": f"Bearer {api_key}"},
                         files={"file": (Path(file_path).name, f, "audio/ogg")},
                         data={"model": "whisper-large-v3"},
@@ -385,3 +396,35 @@ class WhatsAppChannel:
             "application/pdf": ".pdf",
         }
         return ext_map.get(mime, fallback)
+
+    def cleanup_media(self, max_age_hours: int = 0) -> int:
+        """Remove media files older than max_age_hours.
+
+        Proof: Media files accumulate at rate proportional to incoming messages.
+        Without cleanup, disk usage grows unbounded. Default max_age from config
+        (media_max_age_hours). 0 = no cleanup (keep forever).
+
+        Returns number of files removed.
+        """
+        if max_age_hours <= 0:
+            max_age_hours = self.config.get("media_max_age_hours", 24)
+        if max_age_hours <= 0:
+            return 0
+
+        media_dir = Path.home() / ".happycapy-whatsapp" / "media"
+        if not media_dir.exists():
+            return 0
+
+        cutoff = time.time() - (max_age_hours * 3600)
+        removed = 0
+        for f in media_dir.iterdir():
+            if f.is_file() and f.name.startswith("wa_"):
+                try:
+                    if f.stat().st_mtime < cutoff:
+                        f.unlink()
+                        removed += 1
+                except OSError:
+                    pass
+        if removed:
+            print(f"Media cleanup: removed {removed} files older than {max_age_hours}h")
+        return removed
