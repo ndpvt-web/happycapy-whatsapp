@@ -63,6 +63,10 @@ class ContactStore:
         # from multiple contact handlers + background generate_profile).
         # SQLite allows concurrent reads but writes must be serialized.
         self._write_lock = asyncio.Lock()
+        # In-memory profile cache (Theorem T_PCACHE).
+        # Eliminates repeated SQLite SELECT + JSON parse on every message.
+        # Invalidated on save_profile.
+        self._profile_cache: dict[str, ContactProfile] = {}
         self._init_db()
 
     def _init_db(self) -> None:
@@ -130,7 +134,14 @@ class ContactStore:
         return [{"role": r["role"], "content": r["content"], "timestamp": r["timestamp"]} for r in reversed(rows)]
 
     def get_profile(self, jid: str) -> ContactProfile | None:
-        """Get a contact's profile."""
+        """Get a contact's profile.
+
+        Theorem T_PCACHE: Check in-memory cache first (P_CACHE).
+        Cache eliminates SQLite SELECT + JSON parse on the hot path.
+        """
+        if jid in self._profile_cache:
+            return self._profile_cache[jid]
+
         row = self._conn.execute(
             "SELECT * FROM contact_profiles WHERE jid = ?", (jid,)
         ).fetchone()
@@ -143,14 +154,21 @@ class ContactStore:
             profile.jid = jid
             profile.display_name = row["display_name"] or ""
             profile.total_messages_analyzed = row["total_messages_analyzed"]
+            self._profile_cache[jid] = profile
             return profile
         except (json.JSONDecodeError, TypeError):
             return ContactProfile(jid=jid)
 
     async def save_profile(self, profile: ContactProfile) -> None:
-        """Save or update a contact profile (write-locked for async safety)."""
+        """Save or update a contact profile (write-locked for async safety).
+
+        Theorem T_PCACHE: Updates in-memory cache on write (cache invalidation).
+        """
         profile.last_updated = datetime.now().isoformat()
         profile_json = json.dumps(asdict(profile), default=str)
+
+        # Update cache immediately (Theorem T_PCACHE)
+        self._profile_cache[profile.jid] = profile
 
         async with self._write_lock:
             self._conn.execute("""
@@ -177,8 +195,14 @@ class ContactStore:
         new_messages = sample_count - profile.total_messages_analyzed
         return new_messages >= self.PROFILE_UPDATE_INTERVAL
 
-    async def generate_profile(self, jid: str, config: dict) -> ContactProfile | None:
-        """Generate or update a contact profile using LLM analysis."""
+    async def generate_profile(
+        self, jid: str, config: dict, client: "httpx.AsyncClient | None" = None,
+    ) -> ContactProfile | None:
+        """Generate or update a contact profile using LLM analysis.
+
+        Theorem T_POOL: Reuses shared httpx client when provided (P_POOL).
+        Theorem T_PMODEL: Defaults to Haiku for speed (P_HAIKU).
+        """
         samples = self.get_recent_samples(jid, limit=40)
         if len(samples) < self.MIN_SAMPLES_FOR_PROFILE:
             return None
@@ -225,28 +249,30 @@ Return ONLY valid JSON, no markdown or explanation."""
             return None
 
         gateway_url = config.get("ai_gateway_url", "https://ai-gateway.happycapy.ai/api/v1")
-        model = config.get("profile_model", config.get("ai_model", "claude-sonnet-4-6"))
+        # Theorem T_PMODEL: Use Haiku for profile gen (faster, non-user-facing).
+        model = config.get("profile_model", "claude-haiku-4-5-20251001")
+
+        url = f"{gateway_url}/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "You are a conversation analyst. Return only valid JSON."},
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": 1024,
+            "temperature": 0.3,
+        }
 
         try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(
-                    f"{gateway_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": "You are a conversation analyst. Return only valid JSON."},
-                            {"role": "user", "content": prompt},
-                        ],
-                        "max_tokens": 1024,
-                        "temperature": 0.3,
-                    },
-                    timeout=30.0,
-                )
-                if resp.status_code == 200:
+            # Theorem T_POOL: Reuse shared client if provided (P_POOL).
+            if client:
+                resp = await client.post(url, headers=headers, json=payload, timeout=30.0)
+            else:
+                async with httpx.AsyncClient() as _c:
+                    resp = await _c.post(url, headers=headers, json=payload, timeout=30.0)
+
+            if resp.status_code == 200:
                     text = resp.json()["choices"][0]["message"]["content"]
                     # Extract JSON from response (handle markdown wrapping)
                     text = text.strip()

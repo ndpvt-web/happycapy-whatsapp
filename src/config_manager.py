@@ -33,6 +33,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "rate_limit_per_minute": 30,
     "media_max_age_hours": 24,
     "whisper_api_url": "https://api.groq.com/openai/v1/audio/transcriptions",
+    "profile_model": "claude-haiku-4-5-20251001",
 }
 
 # Environment variable overrides (Theorem T4)

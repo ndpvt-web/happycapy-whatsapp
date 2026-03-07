@@ -179,12 +179,15 @@ async def generate_ai_response(
     chat_history: list[dict],
     config: dict,
     media_content: list[dict] | None = None,
+    client: "httpx.AsyncClient | None" = None,
 ) -> str:
     """Generate an AI response using the AI Gateway.
 
+    Theorem T_POOL: Reuses shared httpx client when provided (P_POOL).
+    Saves ~100-300ms per call by avoiding TCP+TLS handshake.
+
     Supports multimodal input (Theorem T_IMG):
     - media_content: list of OpenAI-compatible content parts (image_url, etc.)
-      These are appended to the user message for vision understanding.
     """
     if not httpx:
         return "AI response unavailable (httpx not installed)"
@@ -197,12 +200,8 @@ async def generate_ai_response(
     model = config.get("ai_model", "claude-sonnet-4-6")
 
     messages = [{"role": "system", "content": system_prompt}]
-    # Add recent history (last 20 messages for context)
     messages.extend(chat_history[-20:])
 
-    # Build user message: multimodal if media_content present, text-only otherwise.
-    # Proof (P_B64_VISION): OpenAI-compatible API accepts content as array of parts,
-    # mixing text and image_url types for multimodal understanding.
     if media_content:
         user_parts = [{"type": "text", "text": message}]
         user_parts.extend(media_content)
@@ -210,28 +209,25 @@ async def generate_ai_response(
     else:
         messages.append({"role": "user", "content": message})
 
+    url = f"{gateway_url}/chat/completions"
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    payload = {"model": model, "messages": messages, "max_tokens": 1024, "temperature": 0.7}
+    # Vision needs more time; text-only is faster (Theorem T_LAZY applied to timeout).
+    timeout = 90.0 if media_content else 60.0
+
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{gateway_url}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "messages": messages,
-                    "max_tokens": 1024,
-                    "temperature": 0.7,
-                },
-                timeout=90.0,  # Longer timeout for multimodal (vision takes longer)
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                return data["choices"][0]["message"]["content"]
-            else:
-                print(f"AI Gateway error {resp.status_code}: {resp.text[:200]}")
-                return "I'm having trouble thinking right now. Please try again in a moment."
+        if client:
+            resp = await client.post(url, headers=headers, json=payload, timeout=timeout)
+        else:
+            async with httpx.AsyncClient() as _c:
+                resp = await _c.post(url, headers=headers, json=payload, timeout=timeout)
+
+        if resp.status_code == 200:
+            data = resp.json()
+            return data["choices"][0]["message"]["content"]
+        else:
+            print(f"AI Gateway error {resp.status_code}: {resp.text[:200]}")
+            return "I'm having trouble thinking right now. Please try again in a moment."
     except Exception as e:
         print(f"AI request error: {e}")
         return "I'm temporarily unavailable. Please try again shortly."
@@ -252,6 +248,9 @@ class WhatsAppOrchestrator:
         self.chat_histories: dict[str, list[dict]] = {}  # chat_id -> messages
         self.contact_store: ContactStore | None = None
         self._contact_locks: dict[str, asyncio.Lock] = {}  # per-contact locks for ordered processing
+        # Theorem T_POOL: Single shared httpx client for connection reuse (P_POOL).
+        # Saves ~100-300ms per HTTP call by amortizing TCP+TLS handshake.
+        self._http_client: httpx.AsyncClient | None = None
 
     def print_setup_instructions(self) -> None:
         """Print the setup wizard questions for the user to answer via AskUserQuestion."""
@@ -380,7 +379,10 @@ class WhatsAppOrchestrator:
                     else:
                         media_type = "document"
 
-                result = await process_media(file_path, media_type, media_mime, media_filename, self.config)
+                result = await process_media(
+                    file_path, media_type, media_mime, media_filename, self.config,
+                    client=self._http_client,
+                )
 
                 # Collect multimodal content parts (images, stickers, video keyframes)
                 if result.get("content_parts"):
@@ -409,9 +411,10 @@ class WhatsAppOrchestrator:
         if media_text_parts:
             enriched_content = content + "\n\n" + "\n\n".join(media_text_parts)
 
-        # Store conversation sample for contact profiling (use enriched content)
+        # Theorem T_FIRE: Fire-and-forget sample storage to avoid blocking the AI call.
+        # The asyncio lock inside store_sample handles concurrent writes safely.
         if self.contact_store:
-            await self.contact_store.store_sample(sender_id, "user", enriched_content)
+            asyncio.create_task(self.contact_store.store_sample(sender_id, "user", enriched_content))
 
         if mode == "monitor_only":
             cleanup_temp_files(*temp_files_to_cleanup)
@@ -439,13 +442,15 @@ class WhatsAppOrchestrator:
             if profile_context:
                 system_prompt = system_prompt + "\n" + profile_context
 
-        # Generate AI response with multimodal content if available
+        # Generate AI response with multimodal content if available.
+        # Theorem T_POOL: Pass shared client for connection reuse.
         response = await generate_ai_response(
             message=enriched_content,
             system_prompt=system_prompt,
             chat_history=history,
             config=self.config,
             media_content=media_content_parts if media_content_parts else None,
+            client=self._http_client,
         )
 
         # Cleanup temporary files
@@ -457,18 +462,22 @@ class WhatsAppOrchestrator:
             history.append({"role": "assistant", "content": response})
             print(f"[reply -> {sender_id}] {response[:100]}")
 
-            # Store assistant sample too
+            # Theorem T_FIRE: Fire-and-forget assistant sample storage.
             if self.contact_store:
-                await self.contact_store.store_sample(sender_id, "assistant", response)
+                asyncio.create_task(self.contact_store.store_sample(sender_id, "assistant", response))
 
         # Check if contact profile needs generation/update (async, non-blocking)
         if self.contact_store and self.contact_store.needs_profile_update(sender_id):
             asyncio.create_task(self._update_contact_profile(sender_id))
 
     async def _update_contact_profile(self, jid: str) -> None:
-        """Background task to generate/update a contact profile."""
+        """Background task to generate/update a contact profile.
+
+        Theorem T_POOL: Pass shared client for connection reuse.
+        Theorem T_PMODEL: Profile gen uses Haiku (configured in config_manager).
+        """
         try:
-            await self.contact_store.generate_profile(jid, self.config)
+            await self.contact_store.generate_profile(jid, self.config, client=self._http_client)
         except Exception as e:
             print(f"Contact profile update failed for {jid}: {e}")
 
@@ -492,6 +501,15 @@ class WhatsAppOrchestrator:
         db_path = get_config_dir() / "contacts.db"
         self.contact_store = ContactStore(db_path)
         print(f"Contact store initialized ({db_path})")
+
+        # Theorem T_POOL: Create shared HTTP client with connection pooling.
+        # max_keepalive_connections=5 keeps warm connections to AI Gateway + Whisper API.
+        if httpx:
+            self._http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(90.0, connect=10.0),
+                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
+            )
+            print("HTTP client pool initialized (T_POOL: connection reuse enabled)")
 
         # Start services
         self.start_bridge()
@@ -538,6 +556,11 @@ class WhatsAppOrchestrator:
 
         if self.contact_store:
             self.contact_store.close()
+
+        # Theorem T_POOL: Close shared HTTP client to release connections.
+        if self._http_client:
+            await self._http_client.aclose()
+            self._http_client = None
 
         print("All services stopped.")
 

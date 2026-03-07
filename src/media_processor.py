@@ -13,6 +13,7 @@ Theorems:
          (P_FFMPEG + P_VISION).
 """
 
+import asyncio
 import base64
 import mimetypes
 import os
@@ -245,47 +246,34 @@ def extract_video_audio(file_path: str) -> str | None:
     return None
 
 
-def get_video_duration(file_path: str) -> float:
-    """Get video duration in seconds using ffprobe."""
-    try:
-        result = subprocess.run(
-            [
-                "ffprobe", "-v", "quiet",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                file_path,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode == 0:
-            return float(result.stdout.strip())
-    except Exception:
-        pass
-    return 0.0
-
-
-def process_video(file_path: str, config: dict) -> dict[str, Any]:
+async def process_video(file_path: str, config: dict) -> dict[str, Any]:
     """Process a video: extract keyframe for vision + audio for transcription.
+
+    Theorem T_VPARA: Run keyframe + audio extraction in parallel (P_PARA).
+    Theorem T_LAZY: Removed separate ffprobe duration call (P_LAZY).
+    Uses asyncio.to_thread to avoid blocking the event loop.
 
     Returns a dict with:
     - content_parts: multimodal content parts (keyframe image)
     - audio_path: path to extracted audio (for separate transcription)
-    - duration: video duration in seconds
     - description: human-readable description
     """
-    duration = get_video_duration(file_path)
+    # Run keyframe + audio extraction in parallel (Theorem T_VPARA).
+    # asyncio.to_thread offloads blocking subprocess.run to thread pool,
+    # preventing event loop starvation for concurrent contacts.
+    keyframe_path, audio_path = await asyncio.gather(
+        asyncio.to_thread(extract_video_keyframe, file_path),
+        asyncio.to_thread(extract_video_audio, file_path),
+    )
+
     result: dict[str, Any] = {
         "type": "video",
         "content_parts": [],
         "audio_path": None,
-        "duration": duration,
-        "description": f"Video ({duration:.0f}s)" if duration else "Video",
+        "description": "Video",
     }
 
-    # Extract keyframe for visual understanding
-    keyframe_path = extract_video_keyframe(file_path)
+    # Process keyframe for visual understanding
     if keyframe_path:
         try:
             img_result = process_image(keyframe_path, "image/jpeg")
@@ -294,8 +282,6 @@ def process_video(file_path: str, config: dict) -> dict[str, Any]:
         except Exception:
             pass
 
-    # Extract audio for transcription
-    audio_path = extract_video_audio(file_path)
     if audio_path:
         result["audio_path"] = audio_path
 
@@ -305,11 +291,13 @@ def process_video(file_path: str, config: dict) -> dict[str, Any]:
 # ── Audio Transcription ──
 
 
-async def transcribe_audio(file_path: str, config: dict) -> str:
+async def transcribe_audio(
+    file_path: str, config: dict, client: "httpx.AsyncClient | None" = None,
+) -> str:
     """Transcribe an audio file using the configured Whisper API.
 
-    This centralizes transcription logic so both voice messages and
-    video audio tracks use the same code path.
+    Theorem T_POOL: Reuses shared httpx client when provided (P_POOL).
+    Falls back to creating a one-shot client for backwards compatibility.
     """
     if not httpx:
         return "[Transcription unavailable - httpx not installed]"
@@ -323,20 +311,25 @@ async def transcribe_audio(file_path: str, config: dict) -> str:
     )
 
     try:
-        async with httpx.AsyncClient() as client:
-            with open(file_path, "rb") as f:
-                resp = await client.post(
-                    whisper_url,
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    files={"file": (Path(file_path).name, f, "audio/ogg")},
-                    data={"model": "whisper-large-v3"},
-                    timeout=60.0,
-                )
-                if resp.status_code == 200:
-                    text = resp.json().get("text", "")
-                    return text if text else "[Audio contained no speech]"
-                else:
-                    return f"[Transcription failed: HTTP {resp.status_code}]"
+        with open(file_path, "rb") as f:
+            request_kwargs = dict(
+                url=whisper_url,
+                headers={"Authorization": f"Bearer {api_key}"},
+                files={"file": (Path(file_path).name, f, "audio/ogg")},
+                data={"model": "whisper-large-v3"},
+                timeout=60.0,
+            )
+            if client:
+                resp = await client.post(**request_kwargs)
+            else:
+                async with httpx.AsyncClient() as _c:
+                    resp = await _c.post(**request_kwargs)
+
+            if resp.status_code == 200:
+                text = resp.json().get("text", "")
+                return text if text else "[Audio contained no speech]"
+            else:
+                return f"[Transcription failed: HTTP {resp.status_code}]"
     except Exception as e:
         print(f"Transcription error: {e}")
         return f"[Transcription error: {e}]"
@@ -391,8 +384,11 @@ async def process_media(
     mime: str,
     filename: str,
     config: dict,
+    client: "httpx.AsyncClient | None" = None,
 ) -> dict[str, Any]:
     """Process any inbound media file and return structured understanding.
+
+    Theorem T_POOL: Accepts shared httpx client for connection reuse (P_POOL).
 
     Returns a dict with:
     - type: media type (image, pdf, video, audio, sticker, document)
@@ -420,19 +416,19 @@ async def process_media(
 
     elif media_type == "audio":
         if config.get("voice_transcription", False):
-            transcription = await transcribe_audio(file_path, config)
+            transcription = await transcribe_audio(file_path, config, client=client)
             result["audio_transcription"] = transcription
             result["description"] = "Voice message (transcribed)"
         else:
             result["description"] = "Voice message received"
 
     elif media_type == "video":
-        vid = process_video(file_path, config)
+        vid = await process_video(file_path, config)
         result.update(vid)
 
         # Transcribe video audio if voice transcription is enabled
         if vid.get("audio_path") and config.get("voice_transcription", False):
-            transcription = await transcribe_audio(vid["audio_path"], config)
+            transcription = await transcribe_audio(vid["audio_path"], config, client=client)
             result["audio_transcription"] = transcription
             # Cleanup extracted audio
             try:

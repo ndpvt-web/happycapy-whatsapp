@@ -10,6 +10,7 @@ import base64
 import json
 import re
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +51,9 @@ class WhatsAppChannel:
         self._ws = None
         self._connected = False
         self._running = False
-        self._seen_ids: dict[str, float] = {}
+        # OrderedDict for O(1) dedup eviction (Theorem T_ODEDUP).
+        # Insertion order = temporal order, so popitem(last=False) evicts oldest.
+        self._seen_ids: OrderedDict[str, float] = OrderedDict()
         self._sent_keys: dict[str, dict] = {}
         self._reconnect_attempts = 0
 
@@ -202,9 +205,10 @@ class WhatsAppChannel:
             if msg_id:
                 self._seen_ids[msg_id] = time.time()
                 if len(self._seen_ids) > self._DEDUP_MAX:
-                    oldest = sorted(self._seen_ids, key=self._seen_ids.get)[:self._DEDUP_EVICT_BATCH]
-                    for k in oldest:
-                        del self._seen_ids[k]
+                    # O(1) eviction via OrderedDict (Theorem T_ODEDUP).
+                    # popitem(last=False) removes oldest-inserted entry.
+                    for _ in range(self._DEDUP_EVICT_BATCH):
+                        self._seen_ids.popitem(last=False)
 
             # Config-driven filtering
             if not self._should_process(sender_id, is_group):

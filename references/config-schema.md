@@ -28,7 +28,7 @@ All configuration is stored at `~/.happycapy-whatsapp/config.json`.
 | `media_max_age_hours` | integer | `24` | Hours to keep downloaded media before cleanup (0 = forever) |
 | `bridge_token` | string | `""` | Optional token for WebSocket auth between Python and bridge |
 | `whisper_api_url` | string | `"https://api.groq.com/openai/v1/audio/transcriptions"` | Voice transcription API endpoint |
-| `profile_model` | string | (uses `ai_model`) | AI model for contact profile generation (defaults to ai_model) |
+| `profile_model` | string | `"claude-haiku-4-5-20251001"` | AI model for contact profile generation (Haiku for speed, Theorem T_PMODEL) |
 
 ## Environment Variable Overrides
 
@@ -141,6 +141,32 @@ Every hardcoded constant derives from first-principle premises. No arbitrary "ma
 | T5 | Bridge on internal port, QR server on exposed port | P9 + P12 | `bridge_port: 3002` |
 | T6 | Groups NEVER auto-replied to | P8 | `group_policy: monitor` |
 | T7 | Config file persists so setup wizard only runs once | P3 + P5 | `config_exists()` check |
+
+### Latency Premises
+
+| ID | Premise |
+|----|---------|
+| P_POOL | TCP+TLS handshake costs ~100-300ms per new HTTPS connection |
+| P_PARA | Independent I/O operations can run concurrently via asyncio.gather |
+| P_CACHE | In-memory dict lookup is O(1) vs SQLite SELECT + JSON parse |
+| P_ODEDUP | OrderedDict.popitem(last=False) is O(1) vs sorted() O(n log n) |
+| P_LAZY | Removing non-critical operations from the hot path reduces latency |
+| P_HAIKU | Haiku is fastest Claude model; suitable for non-user-facing tasks |
+| P_SONNET | Sonnet 4.6 balances speed and quality for user-facing responses |
+| P_FIRE | Non-critical writes can be fire-and-forget to unblock the response path |
+
+### Latency Theorems
+
+| ID | Theorem | Derived From | Savings |
+|----|---------|--------------|---------|
+| T_POOL | Shared httpx.AsyncClient across orchestrator lifetime | P_POOL | ~100-300ms/msg |
+| T_VPARA | Parallel video keyframe + audio extraction via asyncio.gather | P_PARA | ~200-500ms/video |
+| T_ODEDUP | OrderedDict dedup with O(1) eviction | P_ODEDUP | ~1-5ms/eviction |
+| T_PCACHE | In-memory contact profile cache with write-through invalidation | P_CACHE | ~2-10ms/msg |
+| T_LAZY | Removed ffprobe duration call; adaptive timeout (90s vision, 60s text) | P_LAZY | ~50-200ms/video |
+| T_FIRE | Fire-and-forget asyncio.create_task for contact sample storage | P_FIRE | ~5-15ms/msg |
+| T_PMODEL | Haiku for profile generation (non-user-facing) | P_HAIKU | ~500-1000ms/profile |
+| T_SONNET | Sonnet 4.6 default for user-facing responses | P_SONNET | Quality + speed |
 
 ### Constants with Proofs
 
