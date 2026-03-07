@@ -108,9 +108,21 @@ Path.home().joinpath(".happycapy-whatsapp", "config.json").write_text(json.dumps
 
 ### Step 3: Start Services
 
-Launch the orchestrator:
+Launch the orchestrator. Use **daemon mode** for 24/7 operation (auto-restarts on crash):
+```bash
+cd ~/.claude/skills/happycapy-whatsapp && bash scripts/start.sh daemon
+```
+
+Or for foreground mode (for debugging):
 ```bash
 cd ~/.claude/skills/happycapy-whatsapp && python3 -m src.main &
+```
+
+Daemon management:
+```bash
+bash ~/.claude/skills/happycapy-whatsapp/scripts/start.sh status   # Check status
+bash ~/.claude/skills/happycapy-whatsapp/scripts/start.sh stop     # Stop daemon
+bash ~/.claude/skills/happycapy-whatsapp/scripts/start.sh restart  # Restart daemon
 ```
 
 ### Step 4: Share QR URL
@@ -127,6 +139,29 @@ Tell the user: "Open this URL and scan the QR code with your WhatsApp mobile app
 ### Step 5: Confirm Connection
 
 Monitor the orchestrator output. When you see "WhatsApp connected!", inform the user that their WhatsApp is now linked and the bot is active.
+
+## 24/7 Daemon Mode
+
+The daemon provides continuous operation with process supervision:
+- **Auto-restart** on crash with exponential backoff (3s to 120s)
+- **PID file** tracking at `~/.happycapy-whatsapp/daemon.pid`
+- **Log rotation** at 10MB with one backup file
+- **Graceful shutdown** via SIGTERM
+- Restarts reset if the process was stable for >5 minutes
+- Maximum 50 restart attempts before giving up
+
+Logs: `~/.happycapy-whatsapp/logs/daemon.log`
+
+## Contact Cards (Persistent Profiles)
+
+The bot automatically builds per-contact profiles over time:
+- After **5 messages** from a contact, an LLM analyzes the conversation to generate a profile
+- Profiles are **re-analyzed every 20 new messages** to stay current
+- Profile data: tone, formality, emoji usage, language, relationship, topics, sample phrases
+- Stored in SQLite at `~/.happycapy-whatsapp/contacts.db`
+- Profiles are injected into the AI system prompt for **personalized, context-aware replies**
+
+This means the bot adapts to each contact's communication style automatically.
 
 ## Architecture
 

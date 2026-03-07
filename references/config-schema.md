@@ -25,6 +25,7 @@ All configuration is stored at `~/.happycapy-whatsapp/config.json`.
 | `ai_model` | string | `"claude-sonnet-4-6"` | AI model for generating responses |
 | `max_message_length` | integer | `4000` | Max chars per WhatsApp message chunk |
 | `rate_limit_per_minute` | integer | `30` | Max outbound messages per minute |
+| `profile_model` | string | (uses `ai_model`) | AI model for contact profile generation (defaults to ai_model) |
 
 ## Environment Variable Overrides
 
@@ -39,6 +40,47 @@ All configuration is stored at `~/.happycapy-whatsapp/config.json`.
 | `AI_MODEL` | `ai_model` | string |
 
 Environment variables always take precedence over config file values.
+
+## Data Files
+
+| File | Location | Description |
+|------|----------|-------------|
+| `config.json` | `~/.happycapy-whatsapp/config.json` | User configuration |
+| `contacts.db` | `~/.happycapy-whatsapp/contacts.db` | SQLite contact profiles and conversation samples |
+| `daemon.pid` | `~/.happycapy-whatsapp/daemon.pid` | Daemon process ID file |
+| `daemon.log` | `~/.happycapy-whatsapp/logs/daemon.log` | Daemon and orchestrator logs (rotated at 10MB) |
+| `whatsapp-auth/` | `~/.happycapy-whatsapp/whatsapp-auth/` | Baileys session files |
+
+## Daemon Configuration
+
+The daemon (`src/daemon.py`) uses these hardcoded settings:
+
+| Setting | Value | Description |
+|---------|-------|-------------|
+| `MAX_RESTARTS` | 50 | Max restart attempts before giving up |
+| `INITIAL_BACKOFF` | 3s | Initial wait before restart |
+| `MAX_BACKOFF` | 120s | Maximum wait between restarts |
+| `STABILITY_THRESHOLD` | 300s | Process must run this long to reset restart counter |
+| `LOG_ROTATION_SIZE` | 10MB | Rotate log when it exceeds this size |
+
+## Contact Profile Fields
+
+Profiles stored in `contacts.db` include:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `display_name` | string | Contact's name (if detected) |
+| `tone` | string | casual, formal, mixed, neutral |
+| `formality` | float | 0.0 (very casual) to 1.0 (very formal) |
+| `emoji_usage` | string | none, rare, moderate, frequent |
+| `avg_message_length` | string | short, medium, long |
+| `language` | string | Primary language code |
+| `languages_used` | string[] | All language codes used |
+| `relationship` | string | friend, family, colleague, acquaintance, unknown |
+| `topics` | string[] | Common discussion topics (max 5) |
+| `response_style` | string | How to match their communication style |
+| `sample_phrases` | string[] | Characteristic phrases (max 5) |
+| `summary` | string | LLM-generated summary of this contact |
 
 ## Safety Rules
 

@@ -1,0 +1,327 @@
+"""Persistent contact card system for context-relevant replies.
+
+Stores per-contact profiles in SQLite with:
+- Communication style (tone, formality, emoji usage, message length)
+- Relationship context (relationship type, topics, interaction frequency)
+- Conversation samples for profile generation
+- Profile evolution tracking (changelog)
+
+Profiles are generated/updated by LLM analysis of conversation samples.
+Injected into system prompt for personalized, context-aware replies.
+"""
+
+import json
+import os
+import sqlite3
+import time
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+try:
+    import httpx
+except ImportError:
+    httpx = None
+
+
+@dataclass
+class ContactProfile:
+    """Per-contact communication profile."""
+    jid: str = ""
+    display_name: str = ""
+    tone: str = "neutral"  # casual, formal, mixed, neutral
+    formality: float = 0.5  # 0.0 = very casual, 1.0 = very formal
+    emoji_usage: str = "moderate"  # none, rare, moderate, frequent
+    avg_message_length: str = "medium"  # short, medium, long
+    language: str = "en"
+    languages_used: list[str] = field(default_factory=lambda: ["en"])
+    relationship: str = "unknown"  # friend, family, colleague, acquaintance, unknown
+    topics: list[str] = field(default_factory=list)
+    interaction_frequency: str = "unknown"  # daily, weekly, monthly, rare, unknown
+    response_style: str = ""
+    sample_phrases: list[str] = field(default_factory=list)
+    summary: str = ""  # LLM-generated summary of this contact
+    total_messages_analyzed: int = 0
+    last_updated: str = ""
+    profile_version: int = 0
+
+
+class ContactStore:
+    """SQLite-backed contact profile store."""
+
+    MIN_SAMPLES_FOR_PROFILE = 5  # Minimum messages before generating a profile
+    PROFILE_UPDATE_INTERVAL = 20  # Re-analyze after this many new messages
+
+    def __init__(self, db_path: str | Path):
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(self.db_path))
+        self._conn.row_factory = sqlite3.Row
+        self._init_db()
+
+    def _init_db(self) -> None:
+        """Create tables if they don't exist."""
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS contact_profiles (
+                jid TEXT PRIMARY KEY,
+                display_name TEXT DEFAULT '',
+                profile_json TEXT DEFAULT '{}',
+                total_messages_analyzed INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS conversation_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                jid TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                timestamp TEXT DEFAULT (datetime('now')),
+                created_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_samples_jid ON conversation_samples(jid);
+            CREATE INDEX IF NOT EXISTS idx_samples_jid_ts ON conversation_samples(jid, timestamp DESC);
+
+            CREATE TABLE IF NOT EXISTS profile_changelog (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                jid TEXT NOT NULL,
+                change_summary TEXT NOT NULL,
+                changed_at TEXT DEFAULT (datetime('now'))
+            );
+        """)
+        self._conn.commit()
+
+    def store_sample(self, jid: str, role: str, content: str, timestamp: str = "") -> None:
+        """Store a conversation sample for future profile analysis."""
+        if not content or len(content.strip()) < 2:
+            return
+
+        ts = timestamp or datetime.now().isoformat()
+        self._conn.execute(
+            "INSERT INTO conversation_samples (jid, role, content, timestamp) VALUES (?, ?, ?, ?)",
+            (jid, role, content[:2000], ts),
+        )
+        self._conn.commit()
+
+    def get_sample_count(self, jid: str) -> int:
+        """Get number of stored samples for a contact."""
+        row = self._conn.execute(
+            "SELECT COUNT(*) as cnt FROM conversation_samples WHERE jid = ?", (jid,)
+        ).fetchone()
+        return row["cnt"] if row else 0
+
+    def get_recent_samples(self, jid: str, limit: int = 30) -> list[dict]:
+        """Get recent conversation samples for a contact."""
+        rows = self._conn.execute(
+            "SELECT role, content, timestamp FROM conversation_samples WHERE jid = ? ORDER BY timestamp DESC LIMIT ?",
+            (jid, limit),
+        ).fetchall()
+        return [{"role": r["role"], "content": r["content"], "timestamp": r["timestamp"]} for r in reversed(rows)]
+
+    def get_profile(self, jid: str) -> ContactProfile | None:
+        """Get a contact's profile."""
+        row = self._conn.execute(
+            "SELECT * FROM contact_profiles WHERE jid = ?", (jid,)
+        ).fetchone()
+        if not row:
+            return None
+
+        try:
+            data = json.loads(row["profile_json"])
+            profile = ContactProfile(**{k: v for k, v in data.items() if k in ContactProfile.__dataclass_fields__})
+            profile.jid = jid
+            profile.display_name = row["display_name"] or ""
+            profile.total_messages_analyzed = row["total_messages_analyzed"]
+            return profile
+        except (json.JSONDecodeError, TypeError):
+            return ContactProfile(jid=jid)
+
+    def save_profile(self, profile: ContactProfile) -> None:
+        """Save or update a contact profile."""
+        profile.last_updated = datetime.now().isoformat()
+        profile_json = json.dumps(asdict(profile), default=str)
+
+        self._conn.execute("""
+            INSERT INTO contact_profiles (jid, display_name, profile_json, total_messages_analyzed, updated_at)
+            VALUES (?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(jid) DO UPDATE SET
+                display_name = excluded.display_name,
+                profile_json = excluded.profile_json,
+                total_messages_analyzed = excluded.total_messages_analyzed,
+                updated_at = datetime('now')
+        """, (profile.jid, profile.display_name, profile_json, profile.total_messages_analyzed))
+        self._conn.commit()
+
+    def needs_profile_update(self, jid: str) -> bool:
+        """Check if a contact needs profile generation/update."""
+        sample_count = self.get_sample_count(jid)
+        if sample_count < self.MIN_SAMPLES_FOR_PROFILE:
+            return False
+
+        profile = self.get_profile(jid)
+        if not profile:
+            return True
+
+        new_messages = sample_count - profile.total_messages_analyzed
+        return new_messages >= self.PROFILE_UPDATE_INTERVAL
+
+    async def generate_profile(self, jid: str, config: dict) -> ContactProfile | None:
+        """Generate or update a contact profile using LLM analysis."""
+        samples = self.get_recent_samples(jid, limit=40)
+        if len(samples) < self.MIN_SAMPLES_FOR_PROFILE:
+            return None
+
+        existing = self.get_profile(jid)
+
+        # Format samples for LLM
+        formatted = []
+        for s in samples:
+            prefix = "Contact" if s["role"] == "user" else "You"
+            formatted.append(f"[{prefix}] {s['content'][:300]}")
+
+        conversation_text = "\n".join(formatted[-30:])
+
+        prompt = f"""Analyze this WhatsApp conversation and create a contact profile.
+
+Conversation samples:
+{conversation_text}
+
+{"Existing profile to update: " + json.dumps(asdict(existing), default=str) if existing else "No existing profile."}
+
+Return a JSON object with these fields:
+- display_name: their likely name (if mentioned) or empty string
+- tone: "casual", "formal", "mixed", or "neutral"
+- formality: 0.0 (very casual) to 1.0 (very formal)
+- emoji_usage: "none", "rare", "moderate", or "frequent"
+- avg_message_length: "short", "medium", or "long"
+- language: primary language code (e.g., "en", "hi", "es")
+- languages_used: array of language codes used
+- relationship: "friend", "family", "colleague", "acquaintance", or "unknown"
+- topics: array of common discussion topics (max 5)
+- interaction_frequency: "daily", "weekly", "monthly", "rare", or "unknown"
+- response_style: one sentence describing how to match their communication style
+- sample_phrases: 3-5 characteristic phrases they use
+- summary: 2-3 sentence summary of this contact and conversation pattern
+
+Return ONLY valid JSON, no markdown or explanation."""
+
+        if not httpx:
+            return None
+
+        api_key = os.environ.get("AI_GATEWAY_API_KEY", "")
+        if not api_key:
+            return None
+
+        gateway_url = config.get("ai_gateway_url", "https://ai-gateway.happycapy.ai/api/v1")
+        model = config.get("profile_model", config.get("ai_model", "claude-sonnet-4-6"))
+
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{gateway_url}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": "You are a conversation analyst. Return only valid JSON."},
+                            {"role": "user", "content": prompt},
+                        ],
+                        "max_tokens": 1024,
+                        "temperature": 0.3,
+                    },
+                    timeout=30.0,
+                )
+                if resp.status_code == 200:
+                    text = resp.json()["choices"][0]["message"]["content"]
+                    # Extract JSON from response (handle markdown wrapping)
+                    text = text.strip()
+                    if text.startswith("```"):
+                        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+
+                    data = json.loads(text)
+                    profile = ContactProfile(
+                        jid=jid,
+                        display_name=data.get("display_name", existing.display_name if existing else ""),
+                        tone=data.get("tone", "neutral"),
+                        formality=data.get("formality", 0.5),
+                        emoji_usage=data.get("emoji_usage", "moderate"),
+                        avg_message_length=data.get("avg_message_length", "medium"),
+                        language=data.get("language", "en"),
+                        languages_used=data.get("languages_used", ["en"]),
+                        relationship=data.get("relationship", "unknown"),
+                        topics=data.get("topics", [])[:5],
+                        interaction_frequency=data.get("interaction_frequency", "unknown"),
+                        response_style=data.get("response_style", ""),
+                        sample_phrases=data.get("sample_phrases", [])[:5],
+                        summary=data.get("summary", ""),
+                        total_messages_analyzed=self.get_sample_count(jid),
+                        profile_version=(existing.profile_version + 1) if existing else 1,
+                    )
+                    self.save_profile(profile)
+
+                    # Log change
+                    self._conn.execute(
+                        "INSERT INTO profile_changelog (jid, change_summary) VALUES (?, ?)",
+                        (jid, f"Profile v{profile.profile_version}: {profile.summary[:200]}"),
+                    )
+                    self._conn.commit()
+
+                    print(f"Profile updated for {jid}: {profile.display_name or 'unnamed'} ({profile.relationship})")
+                    return profile
+        except Exception as e:
+            print(f"Profile generation error for {jid}: {e}")
+
+        return None
+
+    def format_profile_for_prompt(self, jid: str) -> str:
+        """Format a contact's profile for injection into the system prompt."""
+        profile = self.get_profile(jid)
+        if not profile:
+            return ""
+
+        parts = []
+        parts.append(f"\n--- Contact Profile ---")
+
+        if profile.display_name:
+            parts.append(f"Name: {profile.display_name}")
+        if profile.relationship != "unknown":
+            parts.append(f"Relationship: {profile.relationship}")
+        if profile.tone != "neutral":
+            parts.append(f"Their tone: {profile.tone} (formality: {profile.formality:.1f})")
+        if profile.language != "en" or len(profile.languages_used) > 1:
+            parts.append(f"Languages: {', '.join(profile.languages_used)}")
+        if profile.topics:
+            parts.append(f"Common topics: {', '.join(profile.topics)}")
+        if profile.emoji_usage != "moderate":
+            parts.append(f"Emoji usage: {profile.emoji_usage}")
+        if profile.response_style:
+            parts.append(f"Match their style: {profile.response_style}")
+        if profile.summary:
+            parts.append(f"Context: {profile.summary}")
+        if profile.sample_phrases:
+            parts.append(f"Their phrases: {', '.join(repr(p) for p in profile.sample_phrases[:3])}")
+
+        parts.append("--- End Profile ---")
+
+        return "\n".join(parts)
+
+    def get_all_profiles(self) -> list[ContactProfile]:
+        """Get all stored contact profiles."""
+        rows = self._conn.execute(
+            "SELECT jid FROM contact_profiles ORDER BY updated_at DESC"
+        ).fetchall()
+        profiles = []
+        for row in rows:
+            p = self.get_profile(row["jid"])
+            if p:
+                profiles.append(p)
+        return profiles
+
+    def close(self) -> None:
+        """Close the database connection."""
+        self._conn.close()

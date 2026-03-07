@@ -35,6 +35,7 @@ from src.config_manager import (
 from src.bridge_manager import BridgeManager
 from src.qr_server import start_qr_server
 from src.whatsapp_channel import WhatsAppChannel
+from src.contact_store import ContactStore
 
 try:
     import httpx
@@ -233,6 +234,7 @@ class WhatsAppOrchestrator:
         self.qr_server = None
         self.channel: WhatsAppChannel | None = None
         self.chat_histories: dict[str, list[dict]] = {}  # chat_id -> messages
+        self.contact_store: ContactStore | None = None
 
     def print_setup_instructions(self) -> None:
         """Print the setup wizard questions for the user to answer via AskUserQuestion."""
@@ -311,6 +313,10 @@ class WhatsAppOrchestrator:
 
         print(f"[{sender_id}] {content[:100]}")
 
+        # Store conversation sample for contact profiling
+        if self.contact_store:
+            self.contact_store.store_sample(sender_id, "user", content)
+
         if mode == "monitor_only":
             return
 
@@ -335,10 +341,17 @@ class WhatsAppOrchestrator:
             # deeper integration with the HappyCapy agent loop
             pass
 
+        # Build per-contact system prompt with profile injection
+        system_prompt = self.system_prompt
+        if self.contact_store:
+            profile_context = self.contact_store.format_profile_for_prompt(sender_id)
+            if profile_context:
+                system_prompt = system_prompt + "\n" + profile_context
+
         # Generate AI response
         response = await generate_ai_response(
             message=content,
-            system_prompt=self.system_prompt,
+            system_prompt=system_prompt,
             chat_history=history,
             config=self.config,
         )
@@ -348,6 +361,21 @@ class WhatsAppOrchestrator:
             await self.channel.send_text(chat_id, response)
             history.append({"role": "assistant", "content": response})
             print(f"[reply -> {sender_id}] {response[:100]}")
+
+            # Store assistant sample too
+            if self.contact_store:
+                self.contact_store.store_sample(sender_id, "assistant", response)
+
+        # Check if contact profile needs generation/update (async, non-blocking)
+        if self.contact_store and self.contact_store.needs_profile_update(sender_id):
+            asyncio.create_task(self._update_contact_profile(sender_id))
+
+    async def _update_contact_profile(self, jid: str) -> None:
+        """Background task to generate/update a contact profile."""
+        try:
+            await self.contact_store.generate_profile(jid, self.config)
+        except Exception as e:
+            print(f"Contact profile update failed for {jid}: {e}")
 
     async def run(self) -> None:
         """Main run loop."""
@@ -364,6 +392,11 @@ class WhatsAppOrchestrator:
             self.config = dict(DEFAULT_CONFIG)
             save_config(self.config)
             self.system_prompt = build_system_prompt(self.config)
+
+        # Initialize contact store for persistent per-contact profiles
+        db_path = get_config_dir() / "contacts.db"
+        self.contact_store = ContactStore(db_path)
+        print(f"Contact store initialized ({db_path})")
 
         # Start services
         self.start_bridge()
@@ -398,6 +431,9 @@ class WhatsAppOrchestrator:
 
         if self.qr_server:
             self.qr_server.shutdown()
+
+        if self.contact_store:
+            self.contact_store.close()
 
         print("All services stopped.")
 

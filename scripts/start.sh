@@ -1,6 +1,13 @@
 #!/bin/bash
 # HappyCapy WhatsApp Skill - Launch Script
-# Starts the Python orchestrator which manages all services.
+# Supports foreground mode and 24/7 daemon mode with process supervision.
+#
+# Usage:
+#   bash start.sh              - Start in foreground (default)
+#   bash start.sh daemon       - Start as background daemon (24/7)
+#   bash start.sh stop         - Stop the running daemon
+#   bash start.sh restart      - Restart the daemon
+#   bash start.sh status       - Show daemon status
 
 set -e
 
@@ -12,6 +19,30 @@ if [ ! -f "$SKILL_DIR/bridge/dist/index.js" ]; then
     bash "$SKILL_DIR/scripts/setup.sh"
 fi
 
-echo "Starting HappyCapy WhatsApp..."
 cd "$SKILL_DIR"
-exec python3 -m src.main
+
+CMD="${1:-foreground}"
+
+case "$CMD" in
+    daemon|start)
+        echo "Starting HappyCapy WhatsApp in daemon mode (24/7)..."
+        python3 -m src.daemon start
+        ;;
+    stop)
+        python3 -m src.daemon stop
+        ;;
+    restart)
+        python3 -m src.daemon restart
+        ;;
+    status)
+        python3 -m src.daemon status
+        ;;
+    foreground|"")
+        echo "Starting HappyCapy WhatsApp in foreground..."
+        exec python3 -m src.main
+        ;;
+    *)
+        echo "Usage: $0 {foreground|daemon|stop|restart|status}"
+        exit 1
+        ;;
+esac
