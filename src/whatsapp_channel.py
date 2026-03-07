@@ -174,6 +174,11 @@ class WhatsAppChannel:
 
     def _should_process(self, sender_id: str, is_group: bool) -> bool:
         """Check if message should be processed based on config filters."""
+        # Theorem T_ADMCMD: Admin always passes through (P_ADMIN).
+        admin_number = self.config.get("admin_number", "")
+        if admin_number and sender_id == admin_number and not is_group:
+            return True
+
         # Groups: never auto-reply (Theorem T6)
         if is_group:
             group_policy = self.config.get("group_policy", "monitor")

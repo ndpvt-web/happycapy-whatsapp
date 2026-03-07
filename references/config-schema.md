@@ -9,6 +9,7 @@ All configuration is stored at `~/.happycapy-whatsapp/config.json`.
 | `purpose` | string | `"personal_assistant"` | Bot purpose: `personal_assistant`, `business_support`, `team_coordination`, `monitoring_only` |
 | `tone` | string | `"casual_friendly"` | Response tone: `casual_friendly`, `professional`, `concise_direct`, `warm_empathetic`, `custom` |
 | `tone_custom_instructions` | string | `""` | Custom tone instructions (when tone = "custom") |
+| `admin_number` | string | `""` | Admin phone number (digits only). Bypasses filters, can send `/` commands (Theorem T_ADMCMD) |
 | `mode` | string | `"auto_reply"` | Reply mode: `auto_reply`, `ask_before_reply`, `monitor_only` |
 | `allowlist` | string[] | `[]` | Phone numbers that can receive replies (E.164 format, empty = everyone) |
 | `blocklist` | string[] | `[]` | Phone numbers blocked from receiving replies |
@@ -39,6 +40,7 @@ All configuration is stored at `~/.happycapy-whatsapp/config.json`.
 | `WHATSAPP_AUTH_DIR` | `auth_dir` | string |
 | `WHATSAPP_BRIDGE_TOKEN` | `bridge_token` | string |
 | `WHATSAPP_MODE` | `mode` | string |
+| `WHATSAPP_ADMIN_NUMBER` | `admin_number` | string |
 | `WHATSAPP_LOG_LEVEL` | `log_level` | string |
 | `AI_GATEWAY_URL` | `ai_gateway_url` | string |
 | `AI_MODEL` | `ai_model` | string |
@@ -96,6 +98,26 @@ Profiles stored in `contacts.db` include:
 | `sample_phrases` | string[] | Characteristic phrases (max 5) |
 | `summary` | string | LLM-generated summary of this contact |
 
+## Admin Commands (Theorem T_ADMCMD)
+
+When `admin_number` is set, that phone number can send slash commands via WhatsApp to control the bot at runtime. Admin always bypasses allowlist/blocklist filters. Non-slash messages from admin go through normal AI flow.
+
+| Command | Description |
+|---------|-------------|
+| `/help` | List all available commands |
+| `/status` | Show current mode, tone, allowlist/blocklist counts, profiles count, model |
+| `/mode <value>` | Change mode: `auto_reply`, `monitor_only`, `ask_before_reply` |
+| `/tone <value>` | Change tone: `casual_friendly`, `professional`, `concise_direct`, `warm_empathetic` |
+| `/allow <number>` | Add phone number to allowlist |
+| `/unallow <number>` | Remove phone number from allowlist |
+| `/block <number>` | Add phone number to blocklist |
+| `/unblock <number>` | Remove phone number from blocklist |
+| `/pause` | Shortcut for `/mode monitor_only` |
+| `/resume` | Shortcut for `/mode auto_reply` |
+| `/contacts` | List up to 20 known contact profiles with details |
+
+All modifying commands persist changes to `config.json` immediately via `save_config()`.
+
 ## Safety Rules
 
 1. **Groups are NEVER auto-replied to** - only `monitor` or `ignore` options
@@ -134,6 +156,7 @@ Every hardcoded constant derives from first-principle premises. No arbitrary "ma
 | P10 | Skills live at `~/.claude/skills/<name>/` with SKILL.md |
 | P11 | `AskUserQuestion` captures user input interactively |
 | P12 | `/app/export-port.sh` exposes ports externally |
+| P_ADMIN | A single trusted phone number must have privileged access to modify bot behavior at runtime without UI |
 | P_DEDUP | WhatsApp delivers retries on reconnect; dedup prevents double-processing |
 | P_SENT | Track outbound message keys for delete/status correlation |
 | P_BAN | WhatsApp bans accounts at ~200 messages/minute |
@@ -150,6 +173,7 @@ Every hardcoded constant derives from first-principle premises. No arbitrary "ma
 | T5 | Bridge on internal port, QR server on exposed port | P9 + P12 | `bridge_port: 3002` |
 | T6 | Groups NEVER auto-replied to | P8 | `group_policy: monitor` |
 | T7 | Config file persists so setup wizard only runs once | P3 + P5 | `config_exists()` check |
+| T_ADMCMD | Admin `/` messages handled as commands, not forwarded to AI. Admin bypasses all filters. | P_ADMIN + T6 | `_handle_admin_command()` in main.py |
 
 ### Latency Premises
 

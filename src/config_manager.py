@@ -19,6 +19,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "tone": "casual_friendly",
     "tone_custom_instructions": "",
     "mode": "auto_reply",
+    "admin_number": "",
     "allowlist": [],
     "blocklist": [],
     "voice_transcription": False,
@@ -47,6 +48,7 @@ ENV_OVERRIDES: dict[str, tuple[str, type]] = {
     "WHATSAPP_AUTH_DIR": ("auth_dir", str),
     "WHATSAPP_BRIDGE_TOKEN": ("bridge_token", str),
     "WHATSAPP_MODE": ("mode", str),
+    "WHATSAPP_ADMIN_NUMBER": ("admin_number", str),
     "WHATSAPP_LOG_LEVEL": ("log_level", str),
     "AI_GATEWAY_URL": ("ai_gateway_url", str),
     "AI_MODEL": ("ai_model", str),
@@ -136,6 +138,10 @@ def validate_config(config: dict[str, Any]) -> list[str]:
     valid_groups = {"monitor", "ignore"}
     if config.get("group_policy") not in valid_groups:
         issues.append(f"Invalid group_policy: {config.get('group_policy')}")
+
+    admin = config.get("admin_number", "")
+    if admin and not admin.replace("+", "").isdigit():
+        issues.append(f"Invalid admin_number: must be phone digits")
 
     port = config.get("bridge_port", 0)
     if not isinstance(port, int) or port < 1024 or port == 3001:

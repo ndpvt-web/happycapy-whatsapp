@@ -49,6 +49,17 @@ except ImportError:
 
 SETUP_QUESTIONS = [
     {
+        "id": "admin_number",
+        "question": "What is your WhatsApp phone number? This registers you as the admin who can control the bot via WhatsApp commands (e.g. /status, /pause, /block).",
+        "header": "Admin",
+        "options": [
+            {"label": "Enter my number", "value": "enter",
+             "description": "You'll type your phone number (digits only, e.g. 14155551234)"},
+            {"label": "Skip - No admin", "value": "skip",
+             "description": "No remote control via WhatsApp (can still configure via HappyCapy UI)"},
+        ],
+    },
+    {
         "id": "purpose",
         "question": "What will you primarily use WhatsApp automation for?",
         "header": "Purpose",
@@ -166,6 +177,12 @@ def map_answers_to_config(answers: dict[str, str]) -> dict:
 
     # Media
     config["media_handling"] = answers.get("media", "acknowledge")
+
+    # Admin number (Theorem T_ADMCMD)
+    admin = answers.get("admin_number", "skip")
+    if admin not in ("skip", "enter", ""):
+        # User entered their phone number via "Other" option
+        config["admin_number"] = "".join(c for c in admin if c.isdigit())
 
     return config
 
@@ -357,6 +374,12 @@ class WhatsAppOrchestrator:
         # Theorem T_LOGREDACT: Never log message content; use length indicators (P_LOGPII).
         print(f"[{sender_id}] ({len(content)} chars, {len(media_paths)} media)")
 
+        # Theorem T_ADMCMD: Admin slash commands are handled directly, not forwarded to AI.
+        admin_number = self.config.get("admin_number", "")
+        if admin_number and sender_id == admin_number and content.strip().startswith("/"):
+            await self._handle_admin_command(chat_id, content.strip())
+            return
+
         # Process media for understanding (before storing sample, so we capture rich content)
         media_content_parts = []  # Multimodal parts for vision API
         media_text_parts = []     # Extracted text to append to content
@@ -475,6 +498,161 @@ class WhatsAppOrchestrator:
         # Check if contact profile needs generation/update (async, non-blocking)
         if self.contact_store and self.contact_store.needs_profile_update(sender_id):
             asyncio.create_task(self._update_contact_profile(sender_id))
+
+    async def _handle_admin_command(self, chat_id: str, command: str) -> None:
+        """Handle an admin slash command via WhatsApp (Theorem T_ADMCMD).
+
+        Admin messages starting with / are routed here instead of the AI.
+        Modifying commands persist changes to config.json immediately.
+        """
+        parts = command.split(maxsplit=1)
+        cmd = parts[0].lower()
+        args = parts[1].strip() if len(parts) > 1 else ""
+
+        if cmd == "/help":
+            help_text = (
+                "*Admin Commands*\n\n"
+                "/status - Bot status\n"
+                "/mode <auto_reply|monitor_only|ask_before_reply> - Change mode\n"
+                "/tone <casual_friendly|professional|concise_direct|warm_empathetic> - Change tone\n"
+                "/allow <number> - Add to allowlist\n"
+                "/unallow <number> - Remove from allowlist\n"
+                "/block <number> - Add to blocklist\n"
+                "/unblock <number> - Remove from blocklist\n"
+                "/pause - Quick switch to monitor_only\n"
+                "/resume - Quick switch to auto_reply\n"
+                "/contacts - List known contacts\n"
+                "/help - This message"
+            )
+            await self.channel.send_text(chat_id, help_text)
+
+        elif cmd == "/status":
+            profiles_count = len(self.contact_store.get_all_profiles()) if self.contact_store else 0
+            status_text = (
+                f"*Bot Status*\n\n"
+                f"Mode: {self.config.get('mode', '?')}\n"
+                f"Tone: {self.config.get('tone', '?')}\n"
+                f"Allowlist: {len(self.config.get('allowlist', []))} contacts\n"
+                f"Blocklist: {len(self.config.get('blocklist', []))} contacts\n"
+                f"Contact profiles: {profiles_count}\n"
+                f"Model: {self.config.get('ai_model', '?')}"
+            )
+            await self.channel.send_text(chat_id, status_text)
+
+        elif cmd == "/mode":
+            valid_modes = {"auto_reply", "monitor_only", "ask_before_reply"}
+            if args in valid_modes:
+                self.config["mode"] = args
+                save_config(self.config)
+                print(f"[admin] Mode -> {args}")
+                await self.channel.send_text(chat_id, f"Mode changed to: {args}")
+            else:
+                await self.channel.send_text(chat_id, f"Usage: /mode <{' | '.join(sorted(valid_modes))}>")
+
+        elif cmd == "/tone":
+            valid_tones = {"casual_friendly", "professional", "concise_direct", "warm_empathetic"}
+            if args in valid_tones:
+                self.config["tone"] = args
+                save_config(self.config)
+                self.system_prompt = build_system_prompt(self.config)
+                print(f"[admin] Tone -> {args}")
+                await self.channel.send_text(chat_id, f"Tone changed to: {args}")
+            else:
+                await self.channel.send_text(chat_id, f"Usage: /tone <{' | '.join(sorted(valid_tones))}>")
+
+        elif cmd == "/allow":
+            if args and args.replace("+", "").isdigit():
+                num = "".join(c for c in args if c.isdigit())
+                allowlist = self.config.get("allowlist", [])
+                if num not in allowlist:
+                    allowlist.append(num)
+                    self.config["allowlist"] = allowlist
+                    save_config(self.config)
+                    print(f"[admin] Allowlist + {num}")
+                    await self.channel.send_text(chat_id, f"Added {num} to allowlist")
+                else:
+                    await self.channel.send_text(chat_id, f"{num} already in allowlist")
+            else:
+                await self.channel.send_text(chat_id, "Usage: /allow <phone_number>")
+
+        elif cmd == "/unallow":
+            if args and args.replace("+", "").isdigit():
+                num = "".join(c for c in args if c.isdigit())
+                allowlist = self.config.get("allowlist", [])
+                if num in allowlist:
+                    allowlist.remove(num)
+                    self.config["allowlist"] = allowlist
+                    save_config(self.config)
+                    print(f"[admin] Allowlist - {num}")
+                    await self.channel.send_text(chat_id, f"Removed {num} from allowlist")
+                else:
+                    await self.channel.send_text(chat_id, f"{num} not in allowlist")
+            else:
+                await self.channel.send_text(chat_id, "Usage: /unallow <phone_number>")
+
+        elif cmd == "/block":
+            if args and args.replace("+", "").isdigit():
+                num = "".join(c for c in args if c.isdigit())
+                blocklist = self.config.get("blocklist", [])
+                if num not in blocklist:
+                    blocklist.append(num)
+                    self.config["blocklist"] = blocklist
+                    save_config(self.config)
+                    print(f"[admin] Blocklist + {num}")
+                    await self.channel.send_text(chat_id, f"Blocked {num}")
+                else:
+                    await self.channel.send_text(chat_id, f"{num} already blocked")
+            else:
+                await self.channel.send_text(chat_id, "Usage: /block <phone_number>")
+
+        elif cmd == "/unblock":
+            if args and args.replace("+", "").isdigit():
+                num = "".join(c for c in args if c.isdigit())
+                blocklist = self.config.get("blocklist", [])
+                if num in blocklist:
+                    blocklist.remove(num)
+                    self.config["blocklist"] = blocklist
+                    save_config(self.config)
+                    print(f"[admin] Blocklist - {num}")
+                    await self.channel.send_text(chat_id, f"Unblocked {num}")
+                else:
+                    await self.channel.send_text(chat_id, f"{num} not in blocklist")
+            else:
+                await self.channel.send_text(chat_id, "Usage: /unblock <phone_number>")
+
+        elif cmd == "/pause":
+            self.config["mode"] = "monitor_only"
+            save_config(self.config)
+            print("[admin] Paused (monitor_only)")
+            await self.channel.send_text(chat_id, "Bot paused. Monitoring only. Use /resume to restart.")
+
+        elif cmd == "/resume":
+            self.config["mode"] = "auto_reply"
+            save_config(self.config)
+            print("[admin] Resumed (auto_reply)")
+            await self.channel.send_text(chat_id, "Bot resumed. Auto-replying to allowed contacts.")
+
+        elif cmd == "/contacts":
+            if self.contact_store:
+                profiles = self.contact_store.get_all_profiles()
+                if profiles:
+                    lines = [f"*Known Contacts ({len(profiles)})*\n"]
+                    for p in profiles[:20]:  # Cap at 20 to avoid message overflow
+                        name = p.display_name or p.jid
+                        rel = p.relationship if p.relationship != "unknown" else ""
+                        lang = p.language if p.language != "en" else ""
+                        details = " | ".join(filter(None, [rel, lang, p.tone]))
+                        lines.append(f"- {name}: {details}" if details else f"- {name}")
+                    if len(profiles) > 20:
+                        lines.append(f"... and {len(profiles) - 20} more")
+                    await self.channel.send_text(chat_id, "\n".join(lines))
+                else:
+                    await self.channel.send_text(chat_id, "No contact profiles yet.")
+            else:
+                await self.channel.send_text(chat_id, "Contact store not initialized.")
+
+        else:
+            await self.channel.send_text(chat_id, f"Unknown command: {cmd}\nType /help for available commands.")
 
     async def _update_contact_profile(self, jid: str) -> None:
         """Background task to generate/update a contact profile.
