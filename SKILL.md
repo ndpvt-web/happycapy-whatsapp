@@ -179,6 +179,37 @@ Browser <-> QR Server (Python HTTP :8765 exposed)
 
 Stored at `~/.happycapy-whatsapp/config.json`. See `references/config-schema.md` for all fields.
 
+## Media Intelligence
+
+The bot understands all incoming media types and can send files outbound.
+
+### Inbound Understanding (automatic)
+- **Images**: Sent to the AI via multimodal vision API - the AI can see and describe images
+- **PDFs**: Text extracted automatically via pdfplumber and included in AI context
+- **Voice messages**: Transcribed to text via Whisper API (when voice_transcription enabled)
+- **Videos**: Keyframe extracted for vision + audio extracted for transcription
+- **Stickers**: Analyzed via vision API like images
+- **Documents**: PDF text extraction; other formats acknowledged with metadata
+
+### Outbound Sending
+
+To send a file (image, PDF, video, audio, document) to a WhatsApp contact:
+
+```bash
+# Send a file
+cd ~/.claude/skills/happycapy-whatsapp
+python -m src.send_file --to 1234567890 --file /path/to/file.pdf
+
+# Send with caption
+python -m src.send_file --to 1234567890 --file photo.jpg --caption "Here you go"
+
+# Send text only
+python -m src.send_file --to 1234567890 --text "Hello from the agent!"
+```
+
+The `--to` parameter accepts phone numbers (digits only) or full JIDs (number@s.whatsapp.net).
+The script auto-connects to the running bridge, sends, and disconnects.
+
 ## Security
 
 - Bridge binds to 127.0.0.1 only (not externally accessible)
@@ -186,10 +217,13 @@ Stored at `~/.happycapy-whatsapp/config.json`. See `references/config-schema.md`
 - Groups are NEVER auto-replied to (Theorem T6)
 - AI reasoning stripped from outbound messages
 - Contact filtering via allowlist/blocklist
-- Rate limiting: 30 messages per minute
+- Rate limiting: configurable messages per minute
+- Media files cleaned up automatically on startup
 
 ## Requirements
 
 - Node.js 20+ (available in HappyCapy)
 - Python 3.11+ (available in HappyCapy)
 - `AI_GATEWAY_API_KEY` environment variable (auto-configured)
+- ffmpeg (for video processing - available in HappyCapy)
+- pdfplumber (for PDF text extraction - installed by setup.sh)

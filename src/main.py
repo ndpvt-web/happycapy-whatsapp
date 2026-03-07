@@ -36,6 +36,7 @@ from src.bridge_manager import BridgeManager
 from src.qr_server import start_qr_server
 from src.whatsapp_channel import WhatsAppChannel
 from src.contact_store import ContactStore
+from src.media_processor import process_media, cleanup_temp_files
 
 try:
     import httpx
@@ -177,8 +178,14 @@ async def generate_ai_response(
     system_prompt: str,
     chat_history: list[dict],
     config: dict,
+    media_content: list[dict] | None = None,
 ) -> str:
-    """Generate an AI response using the AI Gateway."""
+    """Generate an AI response using the AI Gateway.
+
+    Supports multimodal input (Theorem T_IMG):
+    - media_content: list of OpenAI-compatible content parts (image_url, etc.)
+      These are appended to the user message for vision understanding.
+    """
     if not httpx:
         return "AI response unavailable (httpx not installed)"
 
@@ -192,7 +199,16 @@ async def generate_ai_response(
     messages = [{"role": "system", "content": system_prompt}]
     # Add recent history (last 20 messages for context)
     messages.extend(chat_history[-20:])
-    messages.append({"role": "user", "content": message})
+
+    # Build user message: multimodal if media_content present, text-only otherwise.
+    # Proof (P_B64_VISION): OpenAI-compatible API accepts content as array of parts,
+    # mixing text and image_url types for multimodal understanding.
+    if media_content:
+        user_parts = [{"type": "text", "text": message}]
+        user_parts.extend(media_content)
+        messages.append({"role": "user", "content": user_parts})
+    else:
+        messages.append({"role": "user", "content": message})
 
     try:
         async with httpx.AsyncClient() as client:
@@ -208,7 +224,7 @@ async def generate_ai_response(
                     "max_tokens": 1024,
                     "temperature": 0.7,
                 },
-                timeout=60.0,
+                timeout=90.0,  # Longer timeout for multimodal (vision takes longer)
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -326,16 +342,79 @@ class WhatsAppOrchestrator:
     async def _process_message(
         self, sender_id: str, chat_id: str, content: str, media_paths: list, metadata: dict
     ) -> None:
-        """Process a single message (called under per-contact lock)."""
+        """Process a single message (called under per-contact lock).
+
+        Media understanding flow (Theorems T_IMG, T_PDF, T_VID):
+        1. If media_paths contains files, process them via media_processor
+        2. Vision-capable media (images, stickers, video keyframes) become multimodal content parts
+        3. Text-extractable media (PDFs, documents) have text injected into the user message
+        4. Audio/video audio tracks get transcribed and injected as text
+        """
         mode = self.config.get("mode", "auto_reply")
 
         print(f"[{sender_id}] {content[:100]}")
 
-        # Store conversation sample for contact profiling
+        # Process media for understanding (before storing sample, so we capture rich content)
+        media_content_parts = []  # Multimodal parts for vision API
+        media_text_parts = []     # Extracted text to append to content
+        temp_files_to_cleanup = []
+
+        for file_path in media_paths:
+            try:
+                media_type = metadata.get("media_type", "")
+                media_mime = metadata.get("media_mimetype", "")
+                media_filename = metadata.get("media_filename", "")
+
+                # Auto-detect type from extension if not provided
+                if not media_type:
+                    ext = Path(file_path).suffix.lower()
+                    if ext in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
+                        media_type = "sticker" if ext == ".webp" else "image"
+                    elif ext == ".pdf":
+                        media_type = "document"
+                        media_mime = "application/pdf"
+                    elif ext in (".mp4", ".avi", ".mov", ".mkv"):
+                        media_type = "video"
+                    elif ext in (".ogg", ".mp3", ".m4a", ".wav"):
+                        media_type = "audio"
+                    else:
+                        media_type = "document"
+
+                result = await process_media(file_path, media_type, media_mime, media_filename, self.config)
+
+                # Collect multimodal content parts (images, stickers, video keyframes)
+                if result.get("content_parts"):
+                    media_content_parts.extend(result["content_parts"])
+                    print(f"  [media] {result.get('description', media_type)} -> vision")
+
+                # Collect extracted text (PDFs, documents)
+                if result.get("extracted_text"):
+                    media_text_parts.append(result["extracted_text"])
+                    print(f"  [media] {result.get('description', media_type)} -> text extracted")
+
+                # Collect audio transcription (voice, video audio)
+                if result.get("audio_transcription"):
+                    media_text_parts.append(f"[Audio transcription: {result['audio_transcription']}]")
+                    print(f"  [media] Audio transcribed")
+
+                # Track temp files for cleanup
+                if result.get("keyframe_path"):
+                    temp_files_to_cleanup.append(result["keyframe_path"])
+
+            except Exception as e:
+                print(f"  [media] Processing error for {file_path}: {e}")
+
+        # Enrich content with extracted text from media
+        enriched_content = content
+        if media_text_parts:
+            enriched_content = content + "\n\n" + "\n\n".join(media_text_parts)
+
+        # Store conversation sample for contact profiling (use enriched content)
         if self.contact_store:
-            await self.contact_store.store_sample(sender_id, "user", content)
+            await self.contact_store.store_sample(sender_id, "user", enriched_content)
 
         if mode == "monitor_only":
+            cleanup_temp_files(*temp_files_to_cleanup)
             return
 
         # Get/create chat history
@@ -343,7 +422,7 @@ class WhatsAppOrchestrator:
             self.chat_histories[chat_id] = []
 
         history = self.chat_histories[chat_id]
-        history.append({"role": "user", "content": content})
+        history.append({"role": "user", "content": enriched_content})
 
         # Trim history to last 40 messages
         if len(history) > 40:
@@ -351,13 +430,7 @@ class WhatsAppOrchestrator:
             history = self.chat_histories[chat_id]
 
         if mode == "ask_before_reply":
-            # In ask-before-reply mode, print the message and wait
-            # The user would need to approve via the HappyCapy interface
-            print(f"[APPROVAL NEEDED] {sender_id}: {content}")
-            print("(In a full integration, AskUserQuestion would be used here)")
-            # For now, still generate and send - full approval flow requires
-            # deeper integration with the HappyCapy agent loop
-            pass
+            print(f"[APPROVAL NEEDED] {sender_id}: {enriched_content[:200]}")
 
         # Build per-contact system prompt with profile injection
         system_prompt = self.system_prompt
@@ -366,13 +439,17 @@ class WhatsAppOrchestrator:
             if profile_context:
                 system_prompt = system_prompt + "\n" + profile_context
 
-        # Generate AI response
+        # Generate AI response with multimodal content if available
         response = await generate_ai_response(
-            message=content,
+            message=enriched_content,
             system_prompt=system_prompt,
             chat_history=history,
             config=self.config,
+            media_content=media_content_parts if media_content_parts else None,
         )
+
+        # Cleanup temporary files
+        cleanup_temp_files(*temp_files_to_cleanup)
 
         # Send response
         if self.channel and response:

@@ -8,7 +8,6 @@ applies config-driven filtering, and sends AI responses.
 import asyncio
 import base64
 import json
-import os
 import re
 import time
 from pathlib import Path
@@ -18,12 +17,6 @@ try:
     import websockets
 except ImportError:
     websockets = None
-
-try:
-    import httpx
-except ImportError:
-    httpx = None
-
 
 class WhatsAppChannel:
     """Standalone WhatsApp channel with config-driven behavior."""
@@ -221,7 +214,9 @@ class WhatsAppChannel:
                     print(f"[filtered] {sender_id}: {content[:80]}")
                 return
 
-            # Media handling
+            # Media handling - save to disk and pass to orchestrator for understanding.
+            # The orchestrator's media_processor handles vision, PDF extraction,
+            # audio transcription, and video analysis (Theorems T_IMG, T_PDF, T_VID).
             media_base64 = data.get("media_base64", "")
             media_type = data.get("media_type", "")
             media_mimetype = data.get("media_mimetype", "")
@@ -230,59 +225,36 @@ class WhatsAppChannel:
 
             has_media = bool(media_base64)
 
-            # Voice message transcription
-            if media_type == "audio" and has_media:
-                if self.config.get("voice_transcription"):
-                    ext = self._ext_from_mime(media_mimetype, ".ogg")
-                    voice_path = self._save_media(media_base64, msg_id, ext)
-                    if voice_path:
-                        transcription = await self._transcribe_voice(voice_path)
-                        content = f"[Voice transcription: {transcription}]" if transcription else "[Voice message: transcription failed]"
-                        try:
-                            Path(voice_path).unlink(missing_ok=True)
-                        except Exception:
-                            pass
-                    else:
-                        content = "[Voice message: download failed]"
+            if has_media:
+                # Determine file extension from mime type
+                if media_type == "document" and media_filename:
+                    ext = Path(media_filename).suffix or self._ext_from_mime(media_mimetype, ".bin")
+                elif media_type == "sticker":
+                    ext = ".webp"
                 else:
-                    content = "[Voice message received]"
+                    fallback = {
+                        "image": ".jpg", "audio": ".ogg",
+                        "video": ".mp4", "document": ".bin",
+                    }.get(media_type, ".bin")
+                    ext = self._ext_from_mime(media_mimetype, fallback)
 
-            # Image handling
-            elif media_type == "image" and has_media:
-                ext = self._ext_from_mime(media_mimetype, ".jpg")
-                image_path = self._save_media(media_base64, msg_id, ext)
-                if image_path:
-                    caption = content.replace("[Image]", "").strip() if content.startswith("[Image]") else content
-                    content = caption if caption else "User sent an image"
-                    media_paths.append(image_path)
+                saved_path = self._save_media(media_base64, msg_id, ext)
+                if saved_path:
+                    media_paths.append(saved_path)
 
-            # Video handling
-            elif media_type == "video" and has_media:
-                ext = self._ext_from_mime(media_mimetype, ".mp4")
-                video_path = self._save_media(media_base64, msg_id, ext)
-                if video_path:
-                    caption = content.replace("[Video]", "").strip() if content.startswith("[Video]") else content
-                    content = f"[Video received]" + (f" {caption}" if caption else "")
-                    media_paths.append(video_path)
+                    # Clean up content tags (e.g. "[Image] caption" -> just caption)
+                    tag_prefixes = {
+                        "image": "[Image]", "video": "[Video]",
+                        "document": "[Document]", "sticker": "[Sticker]",
+                        "audio": "[Voice Message]",
+                    }
+                    prefix = tag_prefixes.get(media_type, "")
+                    if prefix and content.startswith(prefix):
+                        content = content[len(prefix):].strip()
+                    if not content:
+                        content = f"User sent a {media_type}"
 
-            # Document handling
-            elif media_type == "document" and has_media:
-                filename = media_filename or ""
-                ext = Path(filename).suffix if filename else self._ext_from_mime(media_mimetype, ".bin")
-                doc_path = self._save_media(media_base64, msg_id, ext)
-                if doc_path:
-                    caption = content.replace("[Document]", "").strip() if content.startswith("[Document]") else content
-                    content = f"[Document: {Path(doc_path).name}]" + (f" {caption}" if caption else "")
-                    media_paths.append(doc_path)
-
-            # Sticker handling
-            elif media_type == "sticker" and has_media:
-                sticker_path = self._save_media(media_base64, msg_id, ".webp")
-                if sticker_path:
-                    content = "User sent a sticker"
-                    media_paths.append(sticker_path)
-
-            # Media handling mode: acknowledge only
+            # Media handling mode: ignore media-only messages if configured
             if has_media and not media_paths and self.config.get("media_handling") == "ignore":
                 return
 
@@ -290,6 +262,9 @@ class WhatsAppChannel:
                 "message_id": msg_id,
                 "timestamp": data.get("timestamp"),
                 "is_group": is_group,
+                "media_type": media_type,
+                "media_mimetype": media_mimetype,
+                "media_filename": media_filename,
             }
 
             if self.on_message:
@@ -334,35 +309,6 @@ class WhatsAppChannel:
         except Exception as e:
             print(f"Failed to save media: {e}")
             return None
-
-    async def _transcribe_voice(self, file_path: str) -> str | None:
-        """Transcribe a voice message using Groq Whisper API."""
-        api_key = os.environ.get("AI_GATEWAY_API_KEY", "")
-        if not api_key:
-            return None
-
-        try:
-            if not httpx:
-                return None
-
-            whisper_url = self.config.get(
-                "whisper_api_url", "https://api.groq.com/openai/v1/audio/transcriptions"
-            )
-            async with httpx.AsyncClient() as client:
-                with open(file_path, "rb") as f:
-                    resp = await client.post(
-                        whisper_url,
-                        headers={"Authorization": f"Bearer {api_key}"},
-                        files={"file": (Path(file_path).name, f, "audio/ogg")},
-                        data={"model": "whisper-large-v3"},
-                        timeout=30.0,
-                    )
-                    if resp.status_code == 200:
-                        return resp.json().get("text", "")
-        except Exception as e:
-            print(f"Transcription error: {e}")
-
-        return None
 
     @classmethod
     def _strip_reasoning(cls, text: str) -> str:

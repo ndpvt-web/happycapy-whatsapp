@@ -24,9 +24,9 @@ echo "  Done. Output: $BRIDGE_DIR/dist/"
 
 # 3. Install Python dependencies
 echo "[3/3] Installing Python dependencies..."
-pip install --break-system-packages --quiet qrcode pillow websockets httpx 2>&1 || \
-pip3 install --break-system-packages --quiet qrcode pillow websockets httpx 2>&1 || \
-pip install --quiet qrcode pillow websockets httpx 2>&1
+pip install --break-system-packages --quiet qrcode pillow websockets httpx pdfplumber 2>&1 || \
+pip3 install --break-system-packages --quiet qrcode pillow websockets httpx pdfplumber 2>&1 || \
+pip install --quiet qrcode pillow websockets httpx pdfplumber 2>&1
 echo "  Done."
 
 # Create data directory

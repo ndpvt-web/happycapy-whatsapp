@@ -46,6 +46,15 @@ All configuration is stored at `~/.happycapy-whatsapp/config.json`.
 
 Environment variables always take precedence over config file values.
 
+## Media Processing Constants
+
+| Constant | Value | Location | Proof |
+|----------|-------|----------|-------|
+| `_PDF_MAX_PAGES` | 50 | media_processor.py | 50 pages x ~500 words = ~25K words = ~33K tokens. Fits context window. |
+| `_PDF_MAX_CHARS` | 30000 | media_processor.py | ~10K tokens. Leaves room for system prompt + history + response. |
+| `_VIDEO_KEYFRAME_COUNT` | 1 | media_processor.py | Single frame sufficient for scene understanding; more bloats payload. |
+| `_MAX_MEDIA_SIZE_BYTES` | 20MB | media_processor.py | WhatsApp limit is 16MB; 20MB provides headroom for documents. |
+
 ## Data Files
 
 | File | Location | Description |
