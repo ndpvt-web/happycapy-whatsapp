@@ -55,48 +55,119 @@ Analyze the user's response to extract as many config values as possible. Use th
 | "never reply", "don't respond", "silent" | mode: "monitor_only" |
 | "ask me first", "approve", "confirm" | mode: "ask_before_reply" |
 
-#### Phase 3: Targeted follow-up questions (only ask what's missing)
+#### Phase 3: Verification gate -- check you have everything
 
-After inference, check which config fields are still ambiguous. **Only** use AskUserQuestion for fields you genuinely cannot determine from the user's description. Ask up to 2 questions maximum, combining related fields where possible.
+After inference, verify you have ALL the information needed. The fields are split into three tiers:
 
-**Common scenarios where NO follow-up is needed:**
-- User said "monitor my business WhatsApp" → purpose, mode, and tone are all clear
-- User said "personal AI assistant, casual tone, reply to everyone" → everything is clear
+**REQUIRED (must ask if missing -- the bot cannot work well without these):**
 
-**When follow-up IS needed, pick from these as relevant:**
+| Field | Why required |
+|---|---|
+| `purpose` | Determines the entire system prompt personality |
+| `mode` | Controls whether bot replies at all -- wrong default = spam or silence |
+| `admin_number` | Needed for admin slash commands, security alerts, and error notifications |
 
-Follow-up A - Reply behavior (only if mode is ambiguous):
-- header: "Replies"
-- question: "Should the bot reply automatically, or ask you first?"
-- options: "Auto-Reply (Recommended)", "Ask Before Replying", "Monitor Only"
+**IMPORTANT (should ask if missing -- affects quality and safety):**
 
-Follow-up B - Contact scope (only if not specified):
-- header: "Contacts"
-- question: "Who should the bot interact with?"
-- options: "Everyone (Recommended)", "Specific contacts only", "Everyone except certain contacts"
+| Field | Why important |
+|---|---|
+| `tone` | Directly affects how the bot sounds to contacts |
+| `allowlist` / contact scope | Wrong default could mean replying to strangers |
 
-Follow-up C - Capabilities (combine voice + media into ONE question):
-- header: "Features"
-- question: "Which extra features do you want enabled?"
-- multiSelect: true
-- options: "Voice transcription (Recommended)", "Media understanding", "Both voice and media"
-
-#### Phase 4: Apply defaults for anything still unset
-
-For any config field not determined by Phase 2 or Phase 3, use these smart defaults:
+**OPTIONAL (safe to use smart defaults):**
 
 | Field | Default | Rationale |
 |---|---|---|
-| purpose | "personal_assistant" | Most common use case |
-| tone | "casual_friendly" | Natural for WhatsApp |
-| mode | "auto_reply" | Users expect the bot to work |
-| allowlist | [] | Empty = everyone allowed |
-| blocklist | [] | No blocks by default |
 | voice_transcription | true | Users generally want this |
-| media_handling | "acknowledge" | Safe default |
+| media_handling | "acknowledge" | Safe, non-committal |
+| group_policy | "monitor" | Never auto-reply in groups (safe) |
+
+**Verification procedure:**
+
+1. After Phase 2 inference, make a checklist of what you have vs what's missing.
+2. Collect ALL missing REQUIRED + IMPORTANT fields into a SINGLE AskUserQuestion call (up to 4 questions max). Use one question per missing field group.
+3. If the user's Phase 1 answer was a preset option (not free text), you will likely be missing most fields -- ask for them all in one go.
+4. NEVER silently default a REQUIRED field. Always ask.
+
+**Example: User selected "Personal AI assistant that replies to my messages"**
+
+You inferred: purpose=personal_assistant, mode=auto_reply.
+Missing REQUIRED: admin_number. Missing IMPORTANT: tone, contact scope.
+Ask ONE AskUserQuestion with up to 3 questions:
+
+```
+Question 1 (header: "Admin"):
+  "What is your phone number? This will be your admin number for controlling the bot via WhatsApp."
+  Options: (let user type via "Other" -- provide example formats as options)
+  - "+1 555 123 4567" - US format example
+  - "+44 7911 123456" - UK format example
+  - "+852 9289 3658" - HK format example
+  multiSelect: false
+
+Question 2 (header: "Tone"):
+  "What tone should the bot use when replying?"
+  Options:
+  - "Casual & Friendly (Recommended)" - Relaxed, conversational
+  - "Professional" - Formal and business-appropriate
+  - "Concise & Direct" - Short, no fluff
+  - "Warm & Empathetic" - Caring and understanding
+  multiSelect: false
+
+Question 3 (header: "Contacts"):
+  "Who should the bot respond to?"
+  Options:
+  - "Everyone (Recommended)" - Reply to all personal messages
+  - "Only my number" - Only reply to admin
+  - "Specific contacts" - I'll provide phone numbers
+  multiSelect: false
+```
+
+**Example: User typed "monitor my business WhatsApp and alert me on +852 92893658"**
+
+You inferred: purpose=monitoring_only, mode=monitor_only, admin_number=85292893658.
+Missing REQUIRED: nothing. Missing IMPORTANT: nothing (tone irrelevant for monitor-only, contacts irrelevant since not replying).
+--> No follow-up needed. Proceed to Phase 4.
+
+**Example: User typed "I want a WhatsApp bot"**
+
+You inferred: mode=auto_reply (from "bot").
+Missing REQUIRED: purpose, admin_number. Missing IMPORTANT: tone, contact scope.
+Ask ONE AskUserQuestion with all 4:
+
+```
+Question 1 (header: "Purpose"):
+  "What should the bot do?"
+  Options:
+  - "Personal Assistant (Recommended)" - Help with personal messages
+  - "Business Support" - Handle customer inquiries
+  - "Team Coordination" - Coordinate team activities
+
+Question 2 (header: "Admin"):
+  "What is your phone number for admin access?"
+  (same format as above)
+
+Question 3 (header: "Tone"):
+  (same as above)
+
+Question 4 (header: "Contacts"):
+  (same as above)
+```
+
+If "Specific contacts" is selected for contacts, do ONE more follow-up asking for comma-separated phone numbers.
+
+#### Phase 4: Apply defaults for OPTIONAL fields only
+
+After all REQUIRED and IMPORTANT fields are resolved (from inference + follow-up questions), apply smart defaults ONLY for optional fields that were not explicitly set:
+
+| Field | Default | Rationale |
+|---|---|---|
+| voice_transcription | true | Users generally want this |
+| media_handling | "acknowledge" | Safe, non-committal |
 | group_policy | "monitor" | Never auto-reply in groups |
 | bridge_port | 3002 | Standard port |
 | qr_server_port | 8765 | Standard port |
+
+**Tone special case:** If mode is "monitor_only", tone defaults to "casual_friendly" silently (it won't be used anyway since the bot doesn't reply). Do NOT ask the user about tone for monitor-only mode.
 
 #### Phase 5: Save config
 
@@ -109,11 +180,11 @@ config = {
     "purpose": "<inferred or asked>",
     "tone": "<inferred or asked>",
     "mode": "<inferred or asked>",
-    "admin_number": "<extracted or empty>",
-    "allowlist": [],  # or specific numbers
+    "admin_number": "<inferred or asked>",
+    "allowlist": [],  # or specific numbers from follow-up
     "blocklist": [],
-    "voice_transcription": True,  # or as configured
-    "media_handling": "acknowledge",  # or as configured
+    "voice_transcription": True,  # default
+    "media_handling": "acknowledge",  # default
     "group_policy": "monitor",
     "bridge_port": 3002,
     "qr_server_port": 8765,
@@ -127,7 +198,26 @@ Path.home().joinpath(".happycapy-whatsapp").mkdir(parents=True, exist_ok=True)
 Path.home().joinpath(".happycapy-whatsapp", "config.json").write_text(json.dumps(config, indent=2))
 ```
 
-**Tell the user what was configured**, showing the inferred values so they know what the bot will do. Example: "Got it -- I've configured your WhatsApp as a personal assistant with casual tone, auto-replying to everyone. Voice transcription is on. Admin number set to +852 92893658."
+#### Phase 6: Confirm back to user
+
+**Always tell the user what was configured** with a summary showing every resolved field, so they can correct anything wrong. Format as a clear list:
+
+Example:
+```
+Here's your WhatsApp configuration:
+- Purpose: Personal Assistant
+- Mode: Auto-reply
+- Tone: Casual & friendly
+- Admin: +852 9289 3658
+- Contacts: Everyone
+- Voice: Transcription enabled
+- Media: Acknowledge
+- Groups: Monitor only
+
+Starting services now...
+```
+
+This lets the user spot any misunderstanding before the bot goes live.
 
 ### Step 3: Start Services
 
