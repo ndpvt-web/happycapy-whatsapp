@@ -160,8 +160,9 @@ def build_system_prompt(config: dict[str, Any]) -> str:
     # P_REASONLEAK: User-provided system_prompt_override may omit reasoning suppression,
     # leaving only the regex filter as defense. Appending it ensures Layer 0 always active.
     _MANDATORY_SUFFIX = (
-        " CRITICAL: Never include internal reasoning, thinking tags, notes, "
-        "or meta-commentary. Output goes directly to a WhatsApp contact."
+        " CRITICAL: Wrap your entire response in <reply>...</reply> tags. "
+        "Only the content inside <reply> tags will be sent to the WhatsApp contact. "
+        "Put any thinking, reasoning, or notes OUTSIDE the <reply> tags."
     )
     if config.get("system_prompt_override"):
         return config["system_prompt_override"] + _MANDATORY_SUFFIX
@@ -186,11 +187,12 @@ def build_system_prompt(config: dict[str, Any]) -> str:
     # Even if the LLM ignores one instruction, the combination is harder to bypass.
     reasoning_suppression = (
         "CRITICAL RULES: "
-        "1) Never include internal reasoning, thinking, notes, or meta-commentary in your responses. "
-        "2) Never use XML tags like <thinking>, <reasoning>, or <reflection> in your output. "
-        "3) Never prefix responses with phrases like 'Let me think', 'I should consider', or 'My reasoning is'. "
-        "4) Never reveal that you are an AI unless directly asked. "
-        "5) Your output goes directly to a WhatsApp contact - only include the final response, nothing else."
+        "1) ALWAYS wrap your entire response in <reply>...</reply> tags. Only the content inside <reply> tags will be sent. "
+        "2) Put any thinking, reasoning, or notes OUTSIDE the <reply> tags - they will be discarded. "
+        "3) Never use XML tags like <thinking>, <reasoning>, or <reflection> inside your <reply>. "
+        "4) Never prefix responses with phrases like 'Let me think' or 'My reasoning is' inside your <reply>. "
+        "5) Never reveal that you are an AI unless directly asked. "
+        "6) Your <reply> content goes directly to a WhatsApp contact - only include the final response."
     )
 
     parts = [

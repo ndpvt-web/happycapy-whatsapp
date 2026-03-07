@@ -216,6 +216,7 @@ Every hardcoded constant derives from first-principle premises. No arbitrary "ma
 | P_PROMPTINJ | Contact-controlled data injected into system prompt can manipulate LLM behavior |
 | P_MEDIASAN | Path traversal in `send_media()` could exfiltrate arbitrary files from the filesystem |
 | P_REASONLEAK | LLMs may emit internal reasoning, thinking tags, or meta-commentary despite system prompt instructions |
+| P_ALLOWLIST | In security, allowlist extraction (only permit known-good) is stronger than blocklist stripping (remove known-bad) |
 
 ### Security & Privacy Theorems
 
@@ -230,7 +231,8 @@ Every hardcoded constant derives from first-principle premises. No arbitrary "ma
 | T_INPUTCAP | MEDIUM | Cap incoming content at 10,000 chars | P_INPUTLEN | whatsapp_channel.py |
 | T_SENDSAN | MEDIUM | Validate send_media paths resolve within media directory | P_MEDIASAN | whatsapp_channel.py |
 | T_PROFSAN | MEDIUM | Bound profile context to 500 chars; truncate all contact-controlled fields | P_PROMPTINJ | contact_store.py |
-| T_REASONSTRIP | HIGH | 4-layer reasoning leak prevention: system prompt + XML strip + tail-anchor + natural language + post-filter detector | P_REASONLEAK | config_manager.py, whatsapp_channel.py, send_file.py |
+| T_ALLOWFIRST | HIGH | Allowlist-first `<reply>` tag extraction with blocklist fallback; both layers always active | P_ALLOWLIST + P_REASONLEAK | whatsapp_channel.py, config_manager.py |
+| T_REASONSTRIP | HIGH | Blocklist safety net: XML strip + tail-anchor + natural language + post-filter detector | P_REASONLEAK | config_manager.py, whatsapp_channel.py, send_file.py |
 | T_ERRREDACT | LOW | Strip raw API errors and stack traces from logs and client messages | P_LOGPII | main.py, media_processor.py, server.ts |
 
 ### Security Constants with Proofs

@@ -33,9 +33,27 @@ class WhatsAppChannel:
     # meta-commentary despite system prompt instructions. Outbound messages
     # must be scrubbed at multiple levels to prevent leakage to contacts.
     #
+    # Architecture: Allowlist-first with blocklist fallback (Theorem T_ALLOWFIRST).
+    # P_ALLOWLIST: Allowlist extraction > blocklist stripping (security axiom).
+    # Unknown reasoning formats can't leak through allowlist; they can through blocklist.
+    #
+    # Primary: Extract content from <reply>...</reply> tags (allowlist).
+    # Fallback: If no tags found, apply blocklist regex layers (graceful degradation).
+    # Safety net: Blocklist regex runs on extracted content too (defense-in-depth).
+    #
+    # Blocklist layers (fallback + safety net):
     # Layer 1: XML/tag-based reasoning blocks (stripped entirely via _XML_REASONING_RE).
     # Layer 2: Tail-anchored reasoning patterns (everything from marker to end).
     # Layer 3: Natural language reasoning prefixes (stripped line-by-line).
+
+    # Primary: Allowlist extraction (Theorem T_ALLOWFIRST).
+    # Extract content from <reply>...</reply> tags. Supports multiple <reply> blocks
+    # (concatenated with newlines). If present, ONLY this content is used as the response.
+    # Tolerant matching: allows whitespace/attributes in opening tag.
+    _REPLY_EXTRACT_RE = re.compile(
+        r"<reply(?:\s[^>]*)?>(?P<content>[\s\S]*?)</reply>",
+        re.IGNORECASE,
+    )
 
     # Layer 1: XML-style reasoning blocks that must be removed entirely.
     # Matches <thinking>...</thinking>, <antThinking>...</antThinking>,
@@ -405,16 +423,26 @@ class WhatsAppChannel:
     def _strip_reasoning(cls, text: str) -> str:
         """Strip AI reasoning/meta-commentary from outbound text (Theorem T_REASONSTRIP).
 
-        Three-layer defense-in-depth:
-        1. Remove XML reasoning blocks (<thinking>...</thinking>, etc.)
-        2. Truncate from structured reasoning markers to end of string
-        3. Remove natural language reasoning lines
+        Allowlist-first architecture (Theorem T_ALLOWFIRST):
+        1. Try to extract content from <reply>...</reply> tags (allowlist).
+           If found, ONLY the extracted content is used — everything outside is discarded.
+        2. If no <reply> tags found, fall back to blocklist stripping (graceful degradation).
+        3. Blocklist regex layers ALWAYS run on final text (defense-in-depth safety net).
 
-        Proof: Any single layer can be bypassed by a sufficiently creative LLM.
-        Three independent layers with different detection strategies make leakage
-        exponentially less likely. Layer order matters: XML first (removes blocks),
-        then tail-anchor (removes trailing reasoning), then line-level (cleanup).
+        Proof: Allowlist extraction makes unknown reasoning formats unable to leak
+        (they're outside the tags). Blocklist fallback ensures no silent message drops
+        when the LLM forgets to use tags. Running blocklist on extracted content catches
+        reasoning accidentally placed inside <reply> tags.
         """
+        # Primary: Allowlist extraction (Theorem T_ALLOWFIRST)
+        reply_matches = cls._REPLY_EXTRACT_RE.findall(text)
+        if reply_matches:
+            # Concatenate all <reply> blocks (LLM may split across multiple tags)
+            text = "\n\n".join(m.strip() for m in reply_matches if m.strip())
+
+        # Safety net: Blocklist regex layers always run, even after allowlist extraction.
+        # Catches reasoning accidentally placed inside <reply> tags, or handles the
+        # fallback case where no <reply> tags were found.
         # Layer 1: Strip XML reasoning blocks (preserves content outside blocks)
         text = cls._XML_REASONING_RE.sub("", text)
         # Layer 2: Truncate from structured markers to end
