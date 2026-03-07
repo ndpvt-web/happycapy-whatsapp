@@ -248,6 +248,8 @@ def start_qr_server(port: int) -> HTTPServer:
     Returns:
         The HTTPServer instance (call .shutdown() to stop)
     """
+    # Set SO_REUSEADDR before bind to avoid "Address already in use" on restart.
+    HTTPServer.allow_reuse_address = True
     server = HTTPServer(("0.0.0.0", port), QRRequestHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

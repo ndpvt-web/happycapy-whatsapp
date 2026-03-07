@@ -42,7 +42,17 @@ def normalize_jid(phone: str) -> str:
 
 
 async def send_text(ws, jid: str, text: str) -> dict:
-    """Send a text message via the bridge."""
+    """Send a text message via the bridge.
+
+    Theorem T_REASONSTRIP: Apply reasoning filter before sending (P_REASONLEAK).
+    This utility bypasses WhatsAppChannel.send_text(), so it must apply
+    the same defense-in-depth filtering independently.
+    """
+    from .whatsapp_channel import WhatsAppChannel
+    text = WhatsAppChannel._strip_reasoning(text)
+    # Layer 4: Post-filter leak detection (Theorem T_REASONSTRIP)
+    if WhatsAppChannel._LEAK_DETECTOR_RE.search(text):
+        print("[warning] Possible reasoning leak detected in outbound text (post-filter)")
     payload = {"type": "send", "to": jid, "text": text}
     await ws.send(json.dumps(payload, ensure_ascii=False))
     response = await asyncio.wait_for(ws.recv(), timeout=30.0)

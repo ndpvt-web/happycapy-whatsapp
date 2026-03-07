@@ -28,8 +28,27 @@ except ImportError:
 class WhatsAppChannel:
     """Standalone WhatsApp channel with config-driven behavior."""
 
-    # AI reasoning patterns to strip from outbound messages
-    _REASONING_PATTERNS = re.compile(
+    # ── Theorem T_REASONSTRIP: Multi-layer reasoning filter (P_REASONLEAK) ──
+    # P_REASONLEAK: LLMs may emit internal reasoning, thinking tags, or
+    # meta-commentary despite system prompt instructions. Outbound messages
+    # must be scrubbed at multiple levels to prevent leakage to contacts.
+    #
+    # Layer 1: XML/tag-based reasoning blocks (stripped entirely via _XML_REASONING_RE).
+    # Layer 2: Tail-anchored reasoning patterns (everything from marker to end).
+    # Layer 3: Natural language reasoning prefixes (stripped line-by-line).
+
+    # Layer 1: XML-style reasoning blocks that must be removed entirely.
+    # Matches <thinking>...</thinking>, <antThinking>...</antThinking>,
+    # <reasoning>...</reasoning>, <reflection>...</reflection>, <inner_monologue>...</inner_monologue>.
+    # Uses re.DOTALL so . matches newlines inside the block.
+    _XML_REASONING_RE = re.compile(
+        r"<(?:thinking|antThinking|reasoning|reflection|inner_monologue)"
+        r"(?:\s[^>]*)?>[\s\S]*?</(?:thinking|antThinking|reasoning|reflection|inner_monologue)>",
+    )
+
+    # Layer 2: Tail-anchored patterns - everything from marker to end of string.
+    # These catch structured reasoning markers that appear mid/end of response.
+    _TAIL_REASONING_RE = re.compile(
         r"(?:"
         r"\n+\(Note:\s"
         r"|\n+Note:\s+I[''']m\s"
@@ -38,8 +57,37 @@ class WhatsAppChannel:
         r"|\n+\(Internal:"
         r"|\n+\(Thinking:"
         r"|\n+\[Reasoning:"
+        r"|\n+---\s*\n+(?:Note|Thinking|Internal|Reasoning):"
+        r"|\n+>\s*(?:Internal|Note|Thinking|Reasoning):"
         r")"
         r"[\s\S]*$",
+    )
+
+    # Layer 3: Natural language reasoning lines to strip individually.
+    # These catch common LLM self-talk patterns that bypass structured markers.
+    _NATURAL_REASONING_RE = re.compile(
+        r"^(?:"
+        r"Let me (?:think|reason|analyze|consider|break down|work through)"
+        r"|I (?:should|need to|will) (?:consider|think|analyze|reason|note)"
+        r"|(?:My|Here'?s my) (?:reasoning|thought process|approach|analysis)"
+        r"|To clarify my (?:reasoning|thinking|thought process)"
+        r"|(?:Thinking|Reasoning) (?:about|through) this"
+        r"|As an AI(?:,| )(?:I |assistant)"
+        r"|I'?m (?:an AI|a language model|not (?:a |)human)"
+        r").*$",
+        re.MULTILINE | re.IGNORECASE,
+    )
+
+    # Layer 4 (Theorem T_REASONSTRIP): Post-filter leak detector.
+    # Weaker signals that individually are too aggressive to strip (false positives),
+    # but together indicate the regex layers missed something. Logs a warning
+    # for monitoring; does NOT block the message (avoiding false-positive suppression).
+    _LEAK_DETECTOR_RE = re.compile(
+        r"<(?:think|reflect|internal|meta|note)[^>]*>"
+        r"|(?:^|\n)\s*\[(?:thinking|internal|note|reasoning)\b"
+        r"|(?:^|\n)\s*\*\*(?:Internal|Thinking|Note|Reasoning):"
+        r"|</?(?:thought|monologue|scratchpad)[^>]*>",
+        re.IGNORECASE,
     )
 
     # ── Constants with Aristotelian proofs ──
@@ -131,6 +179,10 @@ class WhatsAppChannel:
             return
 
         text = self._strip_reasoning(text)
+        # Layer 4 (Theorem T_REASONSTRIP): Post-filter leak detection.
+        # Logs warning if weak signals remain after 3 regex layers.
+        if self._LEAK_DETECTOR_RE.search(text):
+            print("[warning] Possible reasoning leak detected in outbound message (post-filter)")
         max_len = self.config.get("max_message_length", 4000)
         chunks = self._split_message(text, max_len) if len(text) > max_len else [text]
 
@@ -351,8 +403,26 @@ class WhatsAppChannel:
 
     @classmethod
     def _strip_reasoning(cls, text: str) -> str:
-        """Strip AI reasoning/meta-commentary from outbound text."""
-        text = cls._REASONING_PATTERNS.sub("", text)
+        """Strip AI reasoning/meta-commentary from outbound text (Theorem T_REASONSTRIP).
+
+        Three-layer defense-in-depth:
+        1. Remove XML reasoning blocks (<thinking>...</thinking>, etc.)
+        2. Truncate from structured reasoning markers to end of string
+        3. Remove natural language reasoning lines
+
+        Proof: Any single layer can be bypassed by a sufficiently creative LLM.
+        Three independent layers with different detection strategies make leakage
+        exponentially less likely. Layer order matters: XML first (removes blocks),
+        then tail-anchor (removes trailing reasoning), then line-level (cleanup).
+        """
+        # Layer 1: Strip XML reasoning blocks (preserves content outside blocks)
+        text = cls._XML_REASONING_RE.sub("", text)
+        # Layer 2: Truncate from structured markers to end
+        text = cls._TAIL_REASONING_RE.sub("", text)
+        # Layer 3: Remove natural language reasoning lines
+        text = cls._NATURAL_REASONING_RE.sub("", text)
+        # Clean up multiple blank lines left by removals
+        text = re.sub(r"\n{3,}", "\n\n", text)
         return text.strip()
 
     @staticmethod

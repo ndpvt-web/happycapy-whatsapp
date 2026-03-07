@@ -123,7 +123,7 @@ All modifying commands persist changes to `config.json` immediately via `save_co
 1. **Groups are NEVER auto-replied to** - only `monitor` or `ignore` options
 2. **Bridge binds to 127.0.0.1** - never externally accessible
 3. **Port 3001 is reserved** - cannot be used for bridge or QR server
-4. **AI reasoning is stripped** - internal notes never reach WhatsApp contacts
+4. **AI reasoning is stripped (T_REASONSTRIP)** - 4-layer defense: system prompt suppression, XML tag stripping, tail-anchor pattern matching, natural language line removal, plus post-filter log-based leak detection
 5. **Rate limiting** - configurable via `rate_limit_per_minute` (default 30), enforced in Node.js bridge
 6. **Media cleanup** - automatic removal of files older than `media_max_age_hours` on startup
 7. **No CORS on QR endpoint** - QR code is a session credential; wildcard CORS would allow cross-origin theft
@@ -215,6 +215,7 @@ Every hardcoded constant derives from first-principle premises. No arbitrary "ma
 | P_CORS | Wildcard CORS allows any web page to programmatically read cross-origin responses |
 | P_PROMPTINJ | Contact-controlled data injected into system prompt can manipulate LLM behavior |
 | P_MEDIASAN | Path traversal in `send_media()` could exfiltrate arbitrary files from the filesystem |
+| P_REASONLEAK | LLMs may emit internal reasoning, thinking tags, or meta-commentary despite system prompt instructions |
 
 ### Security & Privacy Theorems
 
@@ -229,6 +230,7 @@ Every hardcoded constant derives from first-principle premises. No arbitrary "ma
 | T_INPUTCAP | MEDIUM | Cap incoming content at 10,000 chars | P_INPUTLEN | whatsapp_channel.py |
 | T_SENDSAN | MEDIUM | Validate send_media paths resolve within media directory | P_MEDIASAN | whatsapp_channel.py |
 | T_PROFSAN | MEDIUM | Bound profile context to 500 chars; truncate all contact-controlled fields | P_PROMPTINJ | contact_store.py |
+| T_REASONSTRIP | HIGH | 4-layer reasoning leak prevention: system prompt + XML strip + tail-anchor + natural language + post-filter detector | P_REASONLEAK | config_manager.py, whatsapp_channel.py, send_file.py |
 | T_ERRREDACT | LOW | Strip raw API errors and stack traces from logs and client messages | P_LOGPII | main.py, media_processor.py, server.ts |
 
 ### Security Constants with Proofs

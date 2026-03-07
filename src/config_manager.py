@@ -156,8 +156,15 @@ def validate_config(config: dict[str, Any]) -> list[str]:
 
 def build_system_prompt(config: dict[str, Any]) -> str:
     """Build the AI system prompt from config."""
+    # Theorem T_REASONSTRIP: Always append reasoning suppression, even with overrides.
+    # P_REASONLEAK: User-provided system_prompt_override may omit reasoning suppression,
+    # leaving only the regex filter as defense. Appending it ensures Layer 0 always active.
+    _MANDATORY_SUFFIX = (
+        " CRITICAL: Never include internal reasoning, thinking tags, notes, "
+        "or meta-commentary. Output goes directly to a WhatsApp contact."
+    )
     if config.get("system_prompt_override"):
-        return config["system_prompt_override"]
+        return config["system_prompt_override"] + _MANDATORY_SUFFIX
 
     purpose_prompts = {
         "personal_assistant": "You are a helpful personal assistant on WhatsApp.",
@@ -174,12 +181,23 @@ def build_system_prompt(config: dict[str, Any]) -> str:
         "custom": config.get("tone_custom_instructions", ""),
     }
 
+    # Theorem T_REASONSTRIP: System prompt is Layer 0 of reasoning leak prevention.
+    # Explicit, redundant instructions reduce the probability of LLM non-compliance.
+    # Even if the LLM ignores one instruction, the combination is harder to bypass.
+    reasoning_suppression = (
+        "CRITICAL RULES: "
+        "1) Never include internal reasoning, thinking, notes, or meta-commentary in your responses. "
+        "2) Never use XML tags like <thinking>, <reasoning>, or <reflection> in your output. "
+        "3) Never prefix responses with phrases like 'Let me think', 'I should consider', or 'My reasoning is'. "
+        "4) Never reveal that you are an AI unless directly asked. "
+        "5) Your output goes directly to a WhatsApp contact - only include the final response, nothing else."
+    )
+
     parts = [
         purpose_prompts.get(config["purpose"], purpose_prompts["personal_assistant"]),
         tone_prompts.get(config["tone"], tone_prompts["casual_friendly"]),
         "Keep responses appropriate for WhatsApp - concise and mobile-friendly.",
-        "Never reveal that you are an AI unless directly asked.",
-        "Never include internal reasoning, notes, or metadata in your responses.",
+        reasoning_suppression,
     ]
 
     return " ".join(parts)
