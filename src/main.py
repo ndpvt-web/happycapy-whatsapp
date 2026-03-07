@@ -235,6 +235,7 @@ class WhatsAppOrchestrator:
         self.channel: WhatsAppChannel | None = None
         self.chat_histories: dict[str, list[dict]] = {}  # chat_id -> messages
         self.contact_store: ContactStore | None = None
+        self._contact_locks: dict[str, asyncio.Lock] = {}  # per-contact locks for ordered processing
 
     def print_setup_instructions(self) -> None:
         """Print the setup wizard questions for the user to answer via AskUserQuestion."""
@@ -308,7 +309,24 @@ class WhatsAppOrchestrator:
     async def handle_message(
         self, sender_id: str, chat_id: str, content: str, media_paths: list, metadata: dict
     ) -> None:
-        """Handle an incoming WhatsApp message."""
+        """Handle an incoming WhatsApp message.
+
+        Uses per-contact locks so that:
+        - Messages from DIFFERENT contacts are processed concurrently
+        - Messages from the SAME contact are processed sequentially (preserving order)
+        This prevents contact B from waiting for contact A's AI response.
+        """
+        # Get or create per-contact lock
+        if chat_id not in self._contact_locks:
+            self._contact_locks[chat_id] = asyncio.Lock()
+
+        async with self._contact_locks[chat_id]:
+            await self._process_message(sender_id, chat_id, content, media_paths, metadata)
+
+    async def _process_message(
+        self, sender_id: str, chat_id: str, content: str, media_paths: list, metadata: dict
+    ) -> None:
+        """Process a single message (called under per-contact lock)."""
         mode = self.config.get("mode", "auto_reply")
 
         print(f"[{sender_id}] {content[:100]}")

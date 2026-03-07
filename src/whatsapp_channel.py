@@ -285,7 +285,10 @@ class WhatsAppChannel:
             }
 
             if self.on_message:
-                await self.on_message(sender_id, sender, content, media_paths, metadata)
+                # Dispatch as task so different contacts are processed concurrently.
+                # The orchestrator uses per-contact locks to keep same-contact
+                # messages sequential while allowing cross-contact parallelism.
+                asyncio.create_task(self.on_message(sender_id, sender, content, media_paths, metadata))
 
         elif msg_type == "status":
             status = data.get("status")
