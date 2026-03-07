@@ -217,6 +217,13 @@ Every hardcoded constant derives from first-principle premises. No arbitrary "ma
 | P_MEDIASAN | Path traversal in `send_media()` could exfiltrate arbitrary files from the filesystem |
 | P_REASONLEAK | LLMs may emit internal reasoning, thinking tags, or meta-commentary despite system prompt instructions |
 | P_ALLOWLIST | In security, allowlist extraction (only permit known-good) is stronger than blocklist stripping (remove known-bad) |
+| P_DYNSETUP | Users describe intent in natural language; fixed questionnaires waste time asking what's already stated |
+
+### UX Theorems
+
+| ID | Theorem | Derived From | Location |
+|----|---------|--------------|----------|
+| T_DYNSETUP | Dynamic setup wizard: open question first, parse intent, only ask follow-ups for ambiguous fields | P_DYNSETUP | SKILL.md, config_manager.py |
 
 ### Security & Privacy Theorems
 

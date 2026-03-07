@@ -21,79 +21,100 @@ bash ~/.claude/skills/happycapy-whatsapp/scripts/setup.sh
 
 ### Step 2: Interactive Setup (first time only)
 
-Check if `~/.happycapy-whatsapp/config.json` exists. If NOT, run the setup wizard using AskUserQuestion with these 7 questions:
+Check if `~/.happycapy-whatsapp/config.json` exists. If NOT, run the **dynamic setup wizard**.
 
-**Question 1 - Purpose:**
-Use AskUserQuestion with header "Purpose", question "What will you primarily use WhatsApp automation for?", options:
-- "Personal Assistant (Recommended)" - Auto-reply to personal messages with AI-powered responses
-- "Business Support" - Handle customer inquiries and business communications
-- "Team Coordination" - Help coordinate team activities and reminders
-- "Monitoring Only" - Just log messages, never send replies
+#### Phase 1: Open-ended intent gathering
 
-Map: Personal Assistant -> purpose: "personal_assistant", Business Support -> "business_support", Team Coordination -> "team_coordination", Monitoring Only -> "monitoring_only"
+Use AskUserQuestion with a SINGLE open-ended question:
+- header: "WhatsApp Setup"
+- question: "What would you like to do with WhatsApp? Describe your use case and I'll configure everything automatically. You can also mention your phone number if you'd like admin access."
+- options:
+  - "Personal AI assistant that replies to my messages" - Auto-reply to personal chats with AI
+  - "Monitor messages without replying" - Log and observe WhatsApp activity silently
+  - "Business customer support bot" - Handle customer inquiries automatically
+- multiSelect: false
 
-**Question 2 - Tone:**
-Use AskUserQuestion with header "Tone", question "What tone should the AI use when replying?", options:
-- "Casual & Friendly (Recommended)" - Relaxed, conversational tone
-- "Professional" - Formal and business-appropriate
-- "Concise & Direct" - Short, to-the-point, no filler
-- "Warm & Empathetic" - Caring and understanding
+The user may select an option OR type a custom free-text description via "Other".
 
-Map: Casual -> tone: "casual_friendly", Professional -> "professional", Concise -> "concise_direct", Warm -> "warm_empathetic"
+#### Phase 2: Intent analysis and config inference
 
-**Question 3 - Reply Mode:**
-Use AskUserQuestion with header "Reply Mode", question "How should the bot handle incoming messages?", options:
-- "Auto-Reply (Recommended)" - Automatically respond to allowed contacts
-- "Ask Before Replying" - Show message and proposed reply, wait for approval
-- "Monitor Only" - Log all messages but never reply
+Analyze the user's response to extract as many config values as possible. Use these inference rules:
 
-Map: Auto-Reply -> mode: "auto_reply", Ask Before -> "ask_before_reply", Monitor -> "monitor_only"
+| Signal in user's response | Config inference |
+|---|---|
+| "monitor", "watch", "log", "observe", "alert" | purpose: "monitoring_only", mode: "monitor_only" |
+| "personal", "my messages", "assistant" | purpose: "personal_assistant", mode: "auto_reply" |
+| "business", "customer", "support", "client" | purpose: "business_support", mode: "auto_reply", tone: "professional" |
+| "team", "coordinate", "group", "project" | purpose: "team_coordination", mode: "auto_reply" |
+| Phone number mentioned (e.g. +852 92893658) | admin_number: extracted digits |
+| "everyone", "all contacts" | allowlist: [] (empty = everyone) |
+| "only [name/number]", "specific people" | Follow up for allowlist numbers |
+| "casual", "friendly", "chill" | tone: "casual_friendly" |
+| "professional", "formal", "business" | tone: "professional" |
+| "short", "brief", "concise" | tone: "concise_direct" |
+| "never reply", "don't respond", "silent" | mode: "monitor_only" |
+| "ask me first", "approve", "confirm" | mode: "ask_before_reply" |
 
-**Question 4 - Contacts:**
-Use AskUserQuestion with header "Contacts", question "Who should the bot respond to?", options:
-- "Everyone (Recommended)" - Respond to all personal chat messages
-- "Specific Contacts Only" - Only respond to contacts you specify (follow up for phone numbers)
-- "Everyone Except..." - Block specific contacts (follow up for phone numbers)
+#### Phase 3: Targeted follow-up questions (only ask what's missing)
 
-If "Specific Contacts Only": follow up asking for comma-separated phone numbers -> allowlist
-If "Everyone Except...": follow up asking for numbers to block -> blocklist
+After inference, check which config fields are still ambiguous. **Only** use AskUserQuestion for fields you genuinely cannot determine from the user's description. Ask up to 2 questions maximum, combining related fields where possible.
 
-**Question 5 - Voice Messages:**
-Use AskUserQuestion with header "Voice", question "How should voice messages be handled?", options:
-- "Transcribe (Recommended)" - Convert voice to text using AI
-- "Acknowledge Only" - Note that a voice was received
-- "Ignore" - Skip voice messages
+**Common scenarios where NO follow-up is needed:**
+- User said "monitor my business WhatsApp" → purpose, mode, and tone are all clear
+- User said "personal AI assistant, casual tone, reply to everyone" → everything is clear
 
-Map: Transcribe -> voice_transcription: true, others -> false
+**When follow-up IS needed, pick from these as relevant:**
 
-**Question 6 - Media:**
-Use AskUserQuestion with header "Media", question "How should images, videos, and documents be handled?", options:
-- "Acknowledge Only (Recommended)" - Note media was received
-- "Ignore" - Skip media-only messages
+Follow-up A - Reply behavior (only if mode is ambiguous):
+- header: "Replies"
+- question: "Should the bot reply automatically, or ask you first?"
+- options: "Auto-Reply (Recommended)", "Ask Before Replying", "Monitor Only"
 
-Map: Acknowledge -> media_handling: "acknowledge", Ignore -> "ignore"
+Follow-up B - Contact scope (only if not specified):
+- header: "Contacts"
+- question: "Who should the bot interact with?"
+- options: "Everyone (Recommended)", "Specific contacts only", "Everyone except certain contacts"
 
-**Question 7 - Groups:**
-Use AskUserQuestion with header "Groups", question "How should group messages be handled?", options:
-- "Monitor Only (Recommended)" - Log group messages but NEVER auto-reply
-- "Ignore Completely" - Don't even log group messages
+Follow-up C - Capabilities (combine voice + media into ONE question):
+- header: "Features"
+- question: "Which extra features do you want enabled?"
+- multiSelect: true
+- options: "Voice transcription (Recommended)", "Media understanding", "Both voice and media"
 
-Map: Monitor -> group_policy: "monitor", Ignore -> "ignore"
+#### Phase 4: Apply defaults for anything still unset
 
-After all questions, save config using Python:
+For any config field not determined by Phase 2 or Phase 3, use these smart defaults:
+
+| Field | Default | Rationale |
+|---|---|---|
+| purpose | "personal_assistant" | Most common use case |
+| tone | "casual_friendly" | Natural for WhatsApp |
+| mode | "auto_reply" | Users expect the bot to work |
+| allowlist | [] | Empty = everyone allowed |
+| blocklist | [] | No blocks by default |
+| voice_transcription | true | Users generally want this |
+| media_handling | "acknowledge" | Safe default |
+| group_policy | "monitor" | Never auto-reply in groups |
+| bridge_port | 3002 | Standard port |
+| qr_server_port | 8765 | Standard port |
+
+#### Phase 5: Save config
+
+After resolving all fields, save using Python:
 ```python
-import json
+import json, os
 from pathlib import Path
 
 config = {
-    "purpose": "<from Q1>",
-    "tone": "<from Q2>",
-    "mode": "<from Q3>",
-    "allowlist": [],  # or phone numbers from Q4
-    "blocklist": [],  # or phone numbers from Q4
-    "voice_transcription": True/False,  # from Q5
-    "media_handling": "<from Q6>",
-    "group_policy": "<from Q7>",
+    "purpose": "<inferred or asked>",
+    "tone": "<inferred or asked>",
+    "mode": "<inferred or asked>",
+    "admin_number": "<extracted or empty>",
+    "allowlist": [],  # or specific numbers
+    "blocklist": [],
+    "voice_transcription": True,  # or as configured
+    "media_handling": "acknowledge",  # or as configured
+    "group_policy": "monitor",
     "bridge_port": 3002,
     "qr_server_port": 8765,
     "auth_dir": str(Path.home() / ".happycapy-whatsapp" / "whatsapp-auth"),
@@ -105,6 +126,8 @@ config = {
 Path.home().joinpath(".happycapy-whatsapp").mkdir(parents=True, exist_ok=True)
 Path.home().joinpath(".happycapy-whatsapp", "config.json").write_text(json.dumps(config, indent=2))
 ```
+
+**Tell the user what was configured**, showing the inferred values so they know what the bot will do. Example: "Got it -- I've configured your WhatsApp as a personal assistant with casual tone, auto-replying to everyone. Voice transcription is on. Admin number set to +852 92893658."
 
 ### Step 3: Start Services
 
