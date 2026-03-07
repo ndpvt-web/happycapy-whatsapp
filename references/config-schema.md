@@ -104,6 +104,15 @@ Profiles stored in `contacts.db` include:
 4. **AI reasoning is stripped** - internal notes never reach WhatsApp contacts
 5. **Rate limiting** - configurable via `rate_limit_per_minute` (default 30), enforced in Node.js bridge
 6. **Media cleanup** - automatic removal of files older than `media_max_age_hours` on startup
+7. **No CORS on QR endpoint** - QR code is a session credential; wildcard CORS would allow cross-origin theft
+8. **Restricted file permissions** - config dir 0o700, config file 0o600, SQLite DB 0o600 (owner-only)
+9. **Timing-safe token comparison** - bridge uses `crypto.timingSafeEqual()` to prevent timing side-channels
+10. **Path traversal prevention** - media filenames sanitized to alphanumeric; send_media validates paths within media dir
+11. **Log PII redaction** - message content never logged; only length indicators (e.g., "42 chars")
+12. **TOCTOU-safe temp files** - `tempfile.mkstemp()` for atomic creation (not `mktemp()`)
+13. **Input length capping** - incoming content capped at 10,000 chars to prevent memory DoS
+14. **Prompt injection bounding** - contact profile context hard-capped at 500 chars in system prompt
+15. **Error redaction** - raw API errors and stack traces never logged or sent to clients
 
 ## Aristotelian Proofs for Constants
 
@@ -167,6 +176,46 @@ Every hardcoded constant derives from first-principle premises. No arbitrary "ma
 | T_FIRE | Fire-and-forget asyncio.create_task for contact sample storage | P_FIRE | ~5-15ms/msg |
 | T_PMODEL | Haiku for profile generation (non-user-facing) | P_HAIKU | ~500-1000ms/profile |
 | T_SONNET | Sonnet 4.6 default for user-facing responses | P_SONNET | Quality + speed |
+
+### Security & Privacy Premises
+
+| ID | Premise |
+|----|---------|
+| P_QRAUTH | QR code IS the WhatsApp session credential; stealing it = account hijack |
+| P_FPERMS | Default umask (0644/0755) allows other users to read sensitive files |
+| P_TIMING | JavaScript `===` short-circuits on first mismatch, leaking info via response timing |
+| P_PATHTR | Untrusted message IDs can contain `../` or shell metacharacters |
+| P_LOGPII | Log files may be world-readable or shipped to log aggregators; content = PII |
+| P_TMPRACE | `tempfile.mktemp()` has TOCTOU race: file can be created by attacker between name generation and use |
+| P_INPUTLEN | Unbounded input can exhaust memory or inflate LLM token costs |
+| P_CORS | Wildcard CORS allows any web page to programmatically read cross-origin responses |
+| P_PROMPTINJ | Contact-controlled data injected into system prompt can manipulate LLM behavior |
+| P_MEDIASAN | Path traversal in `send_media()` could exfiltrate arbitrary files from the filesystem |
+
+### Security & Privacy Theorems
+
+| ID | Severity | Theorem | Derived From | Location |
+|----|----------|---------|--------------|----------|
+| T_QRPIN | CRITICAL | No CORS headers on /qr endpoint | P_QRAUTH + P_CORS | qr_server.py |
+| T_FPERM | CRITICAL | Config (0o600), config dir (0o700), DB (0o600) permissions | P_FPERMS | config_manager.py, contact_store.py |
+| T_TSAFE | HIGH | Timing-safe token comparison via `crypto.timingSafeEqual()` | P_TIMING | bridge/src/server.ts |
+| T_PATHSAN | HIGH | Sanitize msg_id to `[a-zA-Z0-9_-]` for media filenames | P_PATHTR | whatsapp_channel.py |
+| T_LOGREDACT | HIGH | Never log message content; use length indicators only | P_LOGPII | main.py, whatsapp_channel.py |
+| T_TMPFILE | MEDIUM | Replace `mktemp()` with `mkstemp()` for atomic temp file creation | P_TMPRACE | media_processor.py |
+| T_INPUTCAP | MEDIUM | Cap incoming content at 10,000 chars | P_INPUTLEN | whatsapp_channel.py |
+| T_SENDSAN | MEDIUM | Validate send_media paths resolve within media directory | P_MEDIASAN | whatsapp_channel.py |
+| T_PROFSAN | MEDIUM | Bound profile context to 500 chars; truncate all contact-controlled fields | P_PROMPTINJ | contact_store.py |
+| T_ERRREDACT | LOW | Strip raw API errors and stack traces from logs and client messages | P_LOGPII | main.py, media_processor.py, server.ts |
+
+### Security Constants with Proofs
+
+| Constant | Value | Proof |
+|----------|-------|-------|
+| `_MAX_CONTENT_CHARS` | 10000 | P_INPUTLEN: 10K chars ~ 3K tokens. WhatsApp rarely exceeds 4096; 10K = headroom without DoS risk. |
+| `_MAX_PROFILE_CONTEXT_CHARS` | 500 | P_PROMPTINJ: 500 chars ~ 150 tokens. Enough for useful context, small enough to limit injection surface. |
+| `_SAFE_FILENAME_RE` | `[^a-zA-Z0-9_-]` | P_PATHTR: Strips everything except safe filename characters from message IDs. |
+| Config dir permissions | 0o700 | P_FPERMS: Owner rwx only. Contains bridge_token, allowlist, API URLs. |
+| Config/DB file permissions | 0o600 | P_FPERMS: Owner rw only. DB contains full conversation history (highly sensitive PII). |
 
 ### Constants with Proofs
 

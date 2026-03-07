@@ -161,11 +161,13 @@ def process_pdf(file_path: str) -> dict[str, Any]:
             "description": f"PDF ({page_count}/{total_pages} pages extracted)",
         }
     except Exception as e:
+        # Theorem T_ERRREDACT: Don't include raw exception in user-facing text (P_LOGPII).
+        print(f"PDF extraction error: {type(e).__name__}")
         return {
             "type": "pdf",
-            "extracted_text": f"[PDF extraction failed: {e}]",
+            "extracted_text": "[PDF extraction failed]",
             "page_count": 0,
-            "description": f"PDF (extraction error: {e})",
+            "description": "PDF (extraction error)",
         }
 
 
@@ -178,7 +180,11 @@ def extract_video_keyframe(file_path: str) -> str | None:
     Returns path to extracted JPEG, or None on failure.
     """
     try:
-        output_path = tempfile.mktemp(suffix=".jpg", prefix="wa_keyframe_")
+        # Theorem T_TMPFILE: Use mkstemp() to atomically create temp file (P_TMPRACE).
+        # mktemp() has TOCTOU race: another process can create the file between
+        # name generation and use, causing data corruption or symlink attacks.
+        fd, output_path = tempfile.mkstemp(suffix=".jpg", prefix="wa_keyframe_")
+        os.close(fd)  # ffmpeg will write to this path
         result = subprocess.run(
             [
                 "ffmpeg", "-i", file_path,
@@ -198,7 +204,8 @@ def extract_video_keyframe(file_path: str) -> str | None:
 
     # Fallback: try simpler approach (grab frame at 1 second)
     try:
-        output_path = tempfile.mktemp(suffix=".jpg", prefix="wa_keyframe_")
+        fd, output_path = tempfile.mkstemp(suffix=".jpg", prefix="wa_keyframe_")
+        os.close(fd)
         result = subprocess.run(
             [
                 "ffmpeg", "-i", file_path,
@@ -225,7 +232,9 @@ def extract_video_audio(file_path: str) -> str | None:
     Returns path to extracted audio file, or None on failure.
     """
     try:
-        output_path = tempfile.mktemp(suffix=".ogg", prefix="wa_audio_")
+        # Theorem T_TMPFILE: Use mkstemp() for atomic temp file creation (P_TMPRACE).
+        fd, output_path = tempfile.mkstemp(suffix=".ogg", prefix="wa_audio_")
+        os.close(fd)
         result = subprocess.run(
             [
                 "ffmpeg", "-i", file_path,
@@ -331,8 +340,9 @@ async def transcribe_audio(
             else:
                 return f"[Transcription failed: HTTP {resp.status_code}]"
     except Exception as e:
-        print(f"Transcription error: {e}")
-        return f"[Transcription error: {e}]"
+        # Theorem T_ERRREDACT: Log error type only, not full details (P_LOGPII).
+        print(f"Transcription error: {type(e).__name__}")
+        return "[Transcription failed]"
 
 
 # ── Sticker Processing ──

@@ -3,6 +3,11 @@
 Serves an auto-refreshing web page that displays the QR code as a PNG image.
 Theorem T1: QR must be served as web page with base64 PNG (from P1 + P6 + P12).
 Theorem T2: QR server must auto-refresh every 2s via JavaScript (from P2 + P6).
+
+Security:
+- Theorem T_QRPIN: No CORS on /qr endpoint (P_QRAUTH + P_CORS).
+  QR code is a session credential. Wildcard CORS would allow any web page
+  to programmatically steal it and hijack the WhatsApp session.
 """
 
 import base64
@@ -213,11 +218,13 @@ class QRRequestHandler(BaseHTTPRequestHandler):
             self.wfile.write(QR_PAGE_HTML.encode("utf-8"))
 
         elif self.path == "/qr":
+            # Theorem T_QRPIN: NO CORS header. QR is a session credential (P_QRAUTH).
+            # Wildcard CORS would let any web page steal the QR and hijack the account.
+            # Same-origin policy restricts access to the QR page's own origin only.
             state = qr_state.get_state()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-cache, no-store")
             self.end_headers()
             self.wfile.write(json.dumps(state).encode("utf-8"))
 

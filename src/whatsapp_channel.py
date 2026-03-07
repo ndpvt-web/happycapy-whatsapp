@@ -3,6 +3,12 @@
 Adapted from nanobot WhatsAppChannel for standalone operation.
 Connects to the Node.js bridge via WebSocket, processes messages,
 applies config-driven filtering, and sends AI responses.
+
+Security:
+- Theorem T_PATHSAN: Sanitize msg_id to alphanumeric for media filenames (P_PATHTR).
+- Theorem T_LOGREDACT: Never log message content; use length indicators (P_LOGPII).
+- Theorem T_INPUTCAP: Cap incoming content at _MAX_CONTENT_CHARS (P_INPUTLEN).
+- Theorem T_SENDSAN: Validate send_media paths within media directory (P_MEDIASAN).
 """
 
 import asyncio
@@ -44,6 +50,12 @@ class WhatsAppChannel:
     # P_SENT: Track outbound message keys for delete/status correlation.
     # 500 = ~16 min at max send rate; outbound needs less history than inbound.
     _SENT_KEYS_MAX = 500
+    # Theorem T_INPUTCAP: Max chars for incoming message content (P_INPUTLEN).
+    # 10000 chars ≈ 3K tokens. WhatsApp messages rarely exceed 4096 chars;
+    # 10K provides headroom for media-enriched content without DoS risk.
+    _MAX_CONTENT_CHARS = 10000
+    # Theorem T_PATHSAN: Regex for safe filename characters (P_PATHTR).
+    _SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9_-]")
 
     def __init__(self, config: dict[str, Any], on_message=None):
         self.config = config
@@ -127,11 +139,21 @@ class WhatsAppChannel:
             await self._ws.send(json.dumps(payload, ensure_ascii=False))
 
     async def send_media(self, chat_id: str, file_path: str) -> None:
-        """Send a media file."""
+        """Send a media file.
+
+        Theorem T_SENDSAN: Validate file path resolves within media directory (P_MEDIASAN).
+        Prevents path traversal attacks from sending arbitrary files.
+        """
         if not self._ws or not self._connected:
             return
 
-        p = Path(file_path)
+        # Theorem T_SENDSAN: Resolve symlinks and verify path is within allowed directories.
+        p = Path(file_path).resolve()
+        media_dir = (Path.home() / ".happycapy-whatsapp" / "media").resolve()
+        if not str(p).startswith(str(media_dir)):
+            print(f"[security] send_media blocked: path outside media dir")
+            return
+
         if not p.is_file():
             print(f"Media file not found: {file_path}")
             return
@@ -195,6 +217,10 @@ class WhatsAppChannel:
             content = data.get("content", "")
             is_group = data.get("isGroup", False)
 
+            # Theorem T_INPUTCAP: Truncate oversized content to prevent memory DoS (P_INPUTLEN).
+            if len(content) > self._MAX_CONTENT_CHARS:
+                content = content[:self._MAX_CONTENT_CHARS]
+
             user_id = pn if pn else sender
             sender_id = user_id.split("@")[0] if "@" in user_id else user_id
 
@@ -212,10 +238,11 @@ class WhatsAppChannel:
 
             # Config-driven filtering
             if not self._should_process(sender_id, is_group):
+                # Theorem T_LOGREDACT: Never log message content; use length indicators (P_LOGPII).
                 if is_group:
-                    print(f"[group message from {sender_id}] {content[:80]}")
+                    print(f"[group] {sender_id} ({len(content)} chars)")
                 else:
-                    print(f"[filtered] {sender_id}: {content[:80]}")
+                    print(f"[filtered] {sender_id} ({len(content)} chars)")
                 return
 
             # Media handling - save to disk and pass to orchestrator for understanding.
@@ -306,7 +333,10 @@ class WhatsAppChannel:
         media_dir = Path.home() / ".happycapy-whatsapp" / "media"
         media_dir.mkdir(parents=True, exist_ok=True)
 
-        file_path = media_dir / f"wa_{msg_id[:16]}{ext}"
+        # Theorem T_PATHSAN: Sanitize msg_id to alphanumeric for safe filenames (P_PATHTR).
+        # Untrusted msg_id could contain "../" or shell metacharacters.
+        safe_id = self._SAFE_FILENAME_RE.sub("", msg_id[:16]) or "unknown"
+        file_path = media_dir / f"wa_{safe_id}{ext}"
         try:
             file_path.write_bytes(base64.b64decode(b64_data))
             return str(file_path)

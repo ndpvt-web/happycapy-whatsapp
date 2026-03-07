@@ -226,10 +226,13 @@ async def generate_ai_response(
             data = resp.json()
             return data["choices"][0]["message"]["content"]
         else:
-            print(f"AI Gateway error {resp.status_code}: {resp.text[:200]}")
+            # Theorem T_ERRREDACT: Don't log raw API response body (P_LOGPII).
+            # Response may contain echoed user content or internal API details.
+            print(f"AI Gateway error: HTTP {resp.status_code}")
             return "I'm having trouble thinking right now. Please try again in a moment."
     except Exception as e:
-        print(f"AI request error: {e}")
+        # Theorem T_ERRREDACT: Log error type only, not full message which may contain PII.
+        print(f"AI request error: {type(e).__name__}")
         return "I'm temporarily unavailable. Please try again shortly."
 
 
@@ -351,7 +354,8 @@ class WhatsAppOrchestrator:
         """
         mode = self.config.get("mode", "auto_reply")
 
-        print(f"[{sender_id}] {content[:100]}")
+        # Theorem T_LOGREDACT: Never log message content; use length indicators (P_LOGPII).
+        print(f"[{sender_id}] ({len(content)} chars, {len(media_paths)} media)")
 
         # Process media for understanding (before storing sample, so we capture rich content)
         media_content_parts = []  # Multimodal parts for vision API
@@ -433,7 +437,8 @@ class WhatsAppOrchestrator:
             history = self.chat_histories[chat_id]
 
         if mode == "ask_before_reply":
-            print(f"[APPROVAL NEEDED] {sender_id}: {enriched_content[:200]}")
+            # Theorem T_LOGREDACT: Don't log content even for approval mode (P_LOGPII).
+            print(f"[APPROVAL NEEDED] {sender_id} ({len(enriched_content)} chars)")
 
         # Build per-contact system prompt with profile injection
         system_prompt = self.system_prompt
@@ -460,7 +465,8 @@ class WhatsAppOrchestrator:
         if self.channel and response:
             await self.channel.send_text(chat_id, response)
             history.append({"role": "assistant", "content": response})
-            print(f"[reply -> {sender_id}] {response[:100]}")
+            # Theorem T_LOGREDACT: Log reply length, not content (P_LOGPII).
+            print(f"[reply -> {sender_id}] ({len(response)} chars)")
 
             # Theorem T_FIRE: Fire-and-forget assistant sample storage.
             if self.contact_store:

@@ -54,11 +54,22 @@ class ContactStore:
     MIN_SAMPLES_FOR_PROFILE = 5  # Minimum messages before generating a profile
     PROFILE_UPDATE_INTERVAL = 20  # Re-analyze after this many new messages
 
+    # Theorem T_PROFSAN: Max chars for profile context injected into system prompt.
+    # Bounds prompt injection surface from contact-manipulated profile data (P_PROMPTINJ).
+    # 500 chars ≈ 150 tokens. Enough for useful context, small enough to limit injection.
+    _MAX_PROFILE_CONTEXT_CHARS = 500
+
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self.db_path))
         self._conn.row_factory = sqlite3.Row
+        # Theorem T_FPERM: Restrict DB file permissions to owner-only (P_FPERMS).
+        # DB contains full conversation history - highly sensitive PII.
+        try:
+            os.chmod(self.db_path, 0o600)
+        except OSError:
+            pass
         # Asyncio lock serializes writes from concurrent tasks (e.g., store_sample
         # from multiple contact handlers + background generate_profile).
         # SQLite allows concurrent reads but writes must be serialized.
@@ -316,7 +327,12 @@ Return ONLY valid JSON, no markdown or explanation."""
         return None
 
     def format_profile_for_prompt(self, jid: str) -> str:
-        """Format a contact's profile for injection into the system prompt."""
+        """Format a contact's profile for injection into the system prompt.
+
+        Theorem T_PROFSAN: Bound total output to _MAX_PROFILE_CONTEXT_CHARS (P_PROMPTINJ).
+        Contact-controlled data (display_name, topics, phrases, summary) could contain
+        prompt injection attempts. Truncation limits the injection surface area.
+        """
         profile = self.get_profile(jid)
         if not profile:
             return ""
@@ -325,27 +341,31 @@ Return ONLY valid JSON, no markdown or explanation."""
         parts.append(f"\n--- Contact Profile ---")
 
         if profile.display_name:
-            parts.append(f"Name: {profile.display_name}")
+            parts.append(f"Name: {profile.display_name[:50]}")
         if profile.relationship != "unknown":
             parts.append(f"Relationship: {profile.relationship}")
         if profile.tone != "neutral":
             parts.append(f"Their tone: {profile.tone} (formality: {profile.formality:.1f})")
         if profile.language != "en" or len(profile.languages_used) > 1:
-            parts.append(f"Languages: {', '.join(profile.languages_used)}")
+            parts.append(f"Languages: {', '.join(profile.languages_used[:5])}")
         if profile.topics:
-            parts.append(f"Common topics: {', '.join(profile.topics)}")
+            parts.append(f"Common topics: {', '.join(t[:30] for t in profile.topics[:5])}")
         if profile.emoji_usage != "moderate":
             parts.append(f"Emoji usage: {profile.emoji_usage}")
         if profile.response_style:
-            parts.append(f"Match their style: {profile.response_style}")
+            parts.append(f"Match their style: {profile.response_style[:100]}")
         if profile.summary:
-            parts.append(f"Context: {profile.summary}")
+            parts.append(f"Context: {profile.summary[:150]}")
         if profile.sample_phrases:
-            parts.append(f"Their phrases: {', '.join(repr(p) for p in profile.sample_phrases[:3])}")
+            parts.append(f"Their phrases: {', '.join(repr(p[:30]) for p in profile.sample_phrases[:3])}")
 
         parts.append("--- End Profile ---")
 
-        return "\n".join(parts)
+        result = "\n".join(parts)
+        # Theorem T_PROFSAN: Hard cap on total profile context length.
+        if len(result) > self._MAX_PROFILE_CONTEXT_CHARS:
+            result = result[:self._MAX_PROFILE_CONTEXT_CHARS] + "\n--- End Profile ---"
+        return result
 
     def get_all_profiles(self) -> list[ContactProfile]:
         """Get all stored contact profiles."""

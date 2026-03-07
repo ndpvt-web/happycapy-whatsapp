@@ -2,6 +2,10 @@
 
 Handles loading, saving, validation, and defaults for all configuration.
 Zero hardcoded values - everything configurable via JSON + env overrides.
+
+Security:
+- Theorem T_FPERM: Config dir (0o700) and config file (0o600) have restricted permissions.
+  Config contains bridge_token, allowlist/blocklist, API URLs - sensitive data (P_FPERMS).
 """
 
 import json
@@ -53,9 +57,23 @@ CONFIG_DIR = Path.home() / ".happycapy-whatsapp"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 
+def _secure_permissions(path: Path, is_dir: bool = False) -> None:
+    """Set restrictive permissions on sensitive files/dirs (Theorem T_FPERM).
+
+    P_FPERMS: Default umask (0644/0755) allows other users to read.
+    Config contains bridge_token, allowlist, API URLs. DB contains messages.
+    Dirs: 0o700 (owner rwx only). Files: 0o600 (owner rw only).
+    """
+    try:
+        os.chmod(path, 0o700 if is_dir else 0o600)
+    except OSError:
+        pass  # Non-fatal: some filesystems don't support chmod
+
+
 def get_config_dir() -> Path:
-    """Return (and create) the config directory."""
+    """Return (and create) the config directory with restricted permissions."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    _secure_permissions(CONFIG_DIR, is_dir=True)  # Theorem T_FPERM
     return CONFIG_DIR
 
 
@@ -84,9 +102,13 @@ def load_config() -> dict[str, Any]:
 
 
 def save_config(config: dict[str, Any]) -> None:
-    """Save config to disk."""
+    """Save config to disk with restricted permissions (Theorem T_FPERM)."""
     get_config_dir()
-    with open(CONFIG_FILE, "w") as f:
+    # Write with restrictive permissions: owner read/write only (0o600).
+    # Use os.open + os.fdopen to set permissions atomically at creation time,
+    # avoiding the window where default umask leaves the file world-readable.
+    fd = os.open(str(CONFIG_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         json.dump(config, f, indent=2)
 
 

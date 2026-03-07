@@ -4,6 +4,7 @@
  */
 
 import { WebSocketServer, WebSocket } from 'ws';
+import { timingSafeEqual } from 'crypto';
 import { WhatsAppClient, InboundMessage } from './whatsapp.js';
 
 interface SendCommand {
@@ -73,7 +74,13 @@ export class BridgeServer {
           clearTimeout(timeout);
           try {
             const msg = JSON.parse(data.toString());
-            if (msg.type === 'auth' && msg.token === this.token) {
+            // Theorem T_TSAFE: Timing-safe token comparison (P_TIMING).
+            // JavaScript === short-circuits on first mismatch, leaking token
+            // length/prefix via response timing. timingSafeEqual always compares
+            // all bytes in constant time, preventing timing side-channel attacks.
+            if (msg.type === 'auth' && typeof msg.token === 'string' && this.token &&
+                msg.token.length === this.token.length &&
+                timingSafeEqual(Buffer.from(msg.token), Buffer.from(this.token))) {
               console.log('Python client authenticated');
               this.setupClient(ws);
             } else {
@@ -101,8 +108,11 @@ export class BridgeServer {
         const result = await this.handleCommand(cmd);
         ws.send(JSON.stringify({ type: 'sent', ...result }));
       } catch (error) {
-        console.error('Error handling command:', error);
-        ws.send(JSON.stringify({ type: 'error', error: String(error) }));
+        // Theorem T_ERRREDACT: Don't leak internal errors to client (P_LOGPII).
+        // Error may contain file paths, stack traces, or internal state.
+        const errMsg = error instanceof Error ? error.message : 'Unknown error';
+        console.error('Command error:', errMsg);
+        ws.send(JSON.stringify({ type: 'error', error: errMsg }));
       }
     });
 
