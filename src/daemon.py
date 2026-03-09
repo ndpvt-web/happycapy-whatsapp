@@ -143,12 +143,15 @@ def _supervise_loop() -> None:
         start_time = time.time()
 
         try:
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
             proc = subprocess.Popen(
-                [sys.executable, "-m", "src.main"],
+                [sys.executable, "-u", "-m", "src.main"],
                 cwd=str(SKILL_DIR),
                 stdout=subprocess.PIPE if LOG_FILE else None,
                 stderr=subprocess.STDOUT if LOG_FILE else None,
                 text=True,
+                env=env,
             )
 
             # Forward output to log

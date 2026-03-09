@@ -32,13 +32,27 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "log_level": "INFO",
     "system_prompt_override": "",
     "bridge_token": "",
-    "ai_gateway_url": "https://ai-gateway.happycapy.ai/api/v1",
-    "ai_model": "claude-sonnet-4-6",
+    "ai_gateway_url": "https://ai-gateway.happycapy.ai/api/v1/openai/v1",
+    "ai_model": "gpt-4.1-mini",
     "max_message_length": 4000,
     "rate_limit_per_minute": 30,
     "media_max_age_hours": 24,
     "whisper_api_url": "https://api.groq.com/openai/v1/audio/transcriptions",
-    "profile_model": "claude-haiku-4-5-20251001",
+    "profile_model": "gpt-4.1-mini",
+    # Intelligence layer fields (nanobot-inspired)
+    "status_override": "",           # available/busy/dnd/away (empty = auto)
+    "auto_reply_when_busy": True,    # Use templates when busy/dnd/away
+    "escalation_enabled": True,      # Enable escalation engine for high-importance messages
+    "importance_threshold": 7,       # Score >= this triggers admin notification
+    "group_keywords": [],            # Keywords that boost group message importance
+    # Quiet hours settings (nanobot-inspired)
+    "quiet_hours_enabled": False,          # Enable/disable quiet hours
+    "quiet_hours_start": "23:00",          # Start time (HH:MM)
+    "quiet_hours_end": "07:00",            # End time (HH:MM)
+    "quiet_hours_timezone": "UTC",         # Timezone (e.g. Asia/Hong_Kong)
+    "quiet_hours_override_threshold": 9,   # Score >= this bypasses quiet hours
+    # Tool calling (LLM function calling for image gen, video gen, PDF creation)
+    "tool_calling_enabled": True,
 }
 
 # Environment variable overrides (Theorem T4)
@@ -233,6 +247,15 @@ def validate_config(config: dict[str, Any]) -> list[str]:
     admin = config.get("admin_number", "")
     if admin and not admin.replace("+", "").isdigit():
         issues.append(f"Invalid admin_number: must be phone digits")
+
+    # Intelligence layer validation
+    valid_statuses = {"", "available", "busy", "dnd", "away"}
+    if config.get("status_override", "") not in valid_statuses:
+        issues.append(f"Invalid status_override: {config.get('status_override')}")
+
+    threshold = config.get("importance_threshold", 7)
+    if not isinstance(threshold, int) or threshold < 1 or threshold > 10:
+        issues.append(f"Invalid importance_threshold: {threshold} (must be 1-10)")
 
     port = config.get("bridge_port", 0)
     if not isinstance(port, int) or port < 1024 or port == 3001:

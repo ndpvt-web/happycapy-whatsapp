@@ -49,6 +49,11 @@ class QRState:
             self._qr_string = ""
             self._qr_png_b64 = ""
 
+    def set_disconnected(self) -> None:
+        """Mark WhatsApp as disconnected. QR data is preserved if available."""
+        with self._lock:
+            self._connected = False
+
     def get_state(self) -> dict:
         with self._lock:
             return {

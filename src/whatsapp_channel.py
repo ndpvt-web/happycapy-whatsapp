@@ -123,9 +123,11 @@ class WhatsAppChannel:
     # Theorem T_PATHSAN: Regex for safe filename characters (P_PATHTR).
     _SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9_-]")
 
-    def __init__(self, config: dict[str, Any], on_message=None):
+    def __init__(self, config: dict[str, Any], on_message=None, on_group_message=None, on_history_sync=None):
         self.config = config
         self.on_message = on_message  # async callback(sender_id, chat_id, content, media_paths, metadata)
+        self.on_group_message = on_group_message  # async callback(sender_id, group_jid, content, metadata)
+        self.on_history_sync = on_history_sync  # async callback(messages, sync_type, progress, is_latest)
         self._ws = None
         self._connected = False
         self._running = False
@@ -160,7 +162,9 @@ class WhatsAppChannel:
                         await ws.send(json.dumps({"type": "auth", "token": self.bridge_token}))
 
                     self._reconnect_attempts = 0
-                    self._connected = True
+                    # Note: _connected stays False until we receive a
+                    # status:connected event from the bridge, meaning WhatsApp
+                    # itself is authenticated. Python-to-Bridge != Bridge-to-WhatsApp.
                     print("Connected to WhatsApp bridge")
 
                     async for message in ws:
@@ -208,6 +212,24 @@ class WhatsAppChannel:
             payload = {"type": "send", "to": chat_id, "text": chunk}
             await self._ws.send(json.dumps(payload, ensure_ascii=False))
 
+    async def send_text_owner_approved(self, chat_id: str, text: str) -> None:
+        """Send a text message with ownerApproved flag (for group sends).
+
+        This is the ONLY way to send to groups. The bridge blocks all group sends
+        without the ownerApproved flag (Premise P_GRPGATE).
+        """
+        if not self._ws or not self._connected:
+            print("Bridge not connected, cannot send")
+            return
+
+        text = self._strip_reasoning(text)
+        max_len = self.config.get("max_message_length", 4000)
+        chunks = self._split_message(text, max_len) if len(text) > max_len else [text]
+
+        for chunk in chunks:
+            payload = {"type": "send", "to": chat_id, "text": chunk, "ownerApproved": True}
+            await self._ws.send(json.dumps(payload, ensure_ascii=False))
+
     async def send_media(self, chat_id: str, file_path: str) -> None:
         """Send a media file.
 
@@ -242,6 +264,53 @@ class WhatsAppChannel:
         }
         await self._ws.send(json.dumps(payload, ensure_ascii=False))
 
+    async def fetch_history(self, chat_jid: str, count: int = 50) -> bool:
+        """Request on-demand history fetch for a specific chat.
+
+        Results arrive asynchronously via the history_sync callback.
+        """
+        if not self._ws or not self._connected:
+            print("Bridge not connected, cannot fetch history")
+            return False
+
+        payload = {
+            "type": "fetch_history",
+            "chatJid": chat_jid,
+            "count": min(count, 50),  # Baileys caps at 50
+        }
+        await self._ws.send(json.dumps(payload, ensure_ascii=False))
+        print(f"[history] Requested {count} messages for {chat_jid[:20]}..")
+        return True
+
+    async def delete_message(self, remote_jid: str, msg_id: str, from_me: bool = True, participant: str = "") -> bool:
+        """Delete a message (delete-for-everyone).
+
+        Args:
+            remote_jid: Chat JID where the message is.
+            msg_id: The message ID to delete.
+            from_me: Whether the message was sent by us.
+            participant: For group messages, the sender's JID.
+
+        Returns:
+            True if delete command was sent.
+        """
+        if not self._ws or not self._connected:
+            print("Bridge not connected, cannot delete")
+            return False
+
+        payload: dict = {
+            "type": "delete",
+            "remoteJid": remote_jid,
+            "msgId": msg_id,
+            "fromMe": from_me,
+        }
+        if participant:
+            payload["participant"] = participant
+
+        await self._ws.send(json.dumps(payload, ensure_ascii=False))
+        print(f"[delete] Sent delete for msg {msg_id} in {remote_jid[:15]}.. (fromMe={from_me})")
+        return True
+
     def _should_process(self, sender_id: str, is_group: bool) -> bool:
         """Check if message should be processed based on config filters."""
         # Theorem T_ADMCMD: Admin always passes through (P_ADMIN).
@@ -249,12 +318,13 @@ class WhatsAppChannel:
         if admin_number and sender_id == admin_number and not is_group:
             return True
 
-        # Groups: never auto-reply (Theorem T6)
+        # Groups: never auto-reply (Theorem T6), but may collect for intelligence
         if is_group:
             group_policy = self.config.get("group_policy", "monitor")
             if group_policy == "ignore":
                 return False
-            # "monitor" = log but don't process for reply
+            # "monitor" = collect samples but don't process for AI reply
+            # Return "monitor" as a special value handled by the caller
             return False
 
         # Mode check
@@ -282,6 +352,9 @@ class WhatsAppChannel:
             return
 
         msg_type = data.get("type")
+        # Debug: log all bridge events (remove after debugging)
+        if msg_type not in ("qr",):
+            print(f"[bridge-event] type={msg_type}")
 
         if msg_type == "message":
             if not self._connected:
@@ -291,6 +364,7 @@ class WhatsAppChannel:
             sender = data.get("sender", "")
             content = data.get("content", "")
             is_group = data.get("isGroup", False)
+            from_me = data.get("fromMe", False)
 
             # Theorem T_INPUTCAP: Truncate oversized content to prevent memory DoS (P_INPUTLEN).
             if len(content) > self._MAX_CONTENT_CHARS:
@@ -298,6 +372,20 @@ class WhatsAppChannel:
 
             user_id = pn if pn else sender
             sender_id = user_id.split("@")[0] if "@" in user_id else user_id
+
+            # fromMe handling: skip bot's own outbound messages, allow admin self-messages.
+            # Without this, admin can't control the bot from their own WhatsApp because
+            # the bot IS their phone, so all admin messages are fromMe.
+            if from_me:
+                admin_number = self.config.get("admin_number", "")
+                if not admin_number or sender_id != admin_number:
+                    # Not admin -> skip all fromMe (other people's echoed messages)
+                    return
+                # Admin fromMe: check if this is the bot's own reply echoed back.
+                # _sent_keys tracks outbound message IDs to prevent infinite loops.
+                msg_id_check = data.get("id", "")
+                if msg_id_check and msg_id_check in self._sent_keys:
+                    return
 
             # Deduplication
             msg_id = data.get("id", "")
@@ -313,8 +401,28 @@ class WhatsAppChannel:
 
             # Config-driven filtering
             if not self._should_process(sender_id, is_group):
-                # Theorem T_LOGREDACT: Never log message content; use length indicators (P_LOGPII).
                 if is_group:
+                    # Group collection: fire-and-forget to collector (no reply, no blocking).
+                    # Extract actual sender from participant field (bridge provides it).
+                    group_policy = self.config.get("group_policy", "monitor")
+                    if group_policy == "monitor" and self.on_group_message and content:
+                        participant = data.get("participant", "")
+                        participant_id = participant.split("@")[0] if "@" in participant else sender_id
+                        group_metadata = {
+                            "message_id": msg_id,
+                            "participant": participant,
+                            "participant_id": participant_id,
+                            "mentioned_jids": data.get("mentionedJids", []),
+                            "group_subject": data.get("groupSubject", ""),
+                            "timestamp": data.get("timestamp"),
+                            # Quoted/reply message tracking
+                            "quoted_message_id": data.get("quotedMessageId", ""),
+                            "quoted_participant": data.get("quotedParticipant", ""),
+                            "quoted_content": data.get("quotedContent", ""),
+                        }
+                        asyncio.create_task(
+                            self.on_group_message(participant_id, sender, content, group_metadata)
+                        )
                     print(f"[group] {sender_id} ({len(content)} chars)")
                 else:
                     print(f"[filtered] {sender_id} ({len(content)} chars)")
@@ -371,6 +479,10 @@ class WhatsAppChannel:
                 "media_type": media_type,
                 "media_mimetype": media_mimetype,
                 "media_filename": media_filename,
+                # Quoted/reply message tracking
+                "quoted_message_id": data.get("quotedMessageId", ""),
+                "quoted_participant": data.get("quotedParticipant", ""),
+                "quoted_content": data.get("quotedContent", ""),
             }
 
             if self.on_message:
@@ -383,8 +495,15 @@ class WhatsAppChannel:
             status = data.get("status")
             if status == "connected":
                 self._connected = True
+                print("WhatsApp connected!")
+                # Update QR server to show connected state
+                from src.qr_server import qr_state
+                qr_state.set_connected()
             elif status == "disconnected":
                 self._connected = False
+                from src.qr_server import qr_state
+                qr_state.set_disconnected()
+                print("WhatsApp disconnected")
 
         elif msg_type == "sent":
             msg_id = data.get("messageId")
@@ -399,6 +518,23 @@ class WhatsAppChannel:
                     keys_to_remove = list(self._sent_keys.keys())[:len(self._sent_keys) - self._SENT_KEYS_MAX]
                     for k in keys_to_remove:
                         del self._sent_keys[k]
+
+        elif msg_type == "qr":
+            # Update QR server with new QR code for web display
+            qr_data = data.get("qr", "")
+            if qr_data:
+                from src.qr_server import qr_state
+                qr_state.update_qr(qr_data)
+                print("QR code received (visible on QR server page)")
+
+        elif msg_type == "history_sync":
+            messages = data.get("messages", [])
+            sync_type = data.get("syncType", 0)
+            progress = data.get("progress")
+            is_latest = data.get("isLatest", False)
+            print(f"[history-sync] {len(messages)} msgs, type={sync_type}, progress={progress}, latest={is_latest}")
+            if self.on_history_sync and messages:
+                asyncio.create_task(self.on_history_sync(messages, sync_type, progress, is_latest))
 
         elif msg_type == "error":
             print(f"Bridge error: {data.get('error')}")

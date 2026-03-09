@@ -5,7 +5,7 @@
 
 import { WebSocketServer, WebSocket } from 'ws';
 import { timingSafeEqual } from 'crypto';
-import { WhatsAppClient, InboundMessage } from './whatsapp.js';
+import { WhatsAppClient, InboundMessage, HistorySyncEvent } from './whatsapp.js';
 
 interface SendCommand {
   type: 'send';
@@ -64,6 +64,15 @@ export class BridgeServer {
       onStatus: (status) => {
         console.log(`STATUS:${status}`);
         this.broadcast({ type: 'status', status });
+      },
+      onHistorySync: (event: HistorySyncEvent) => {
+        this.broadcast({
+          type: 'history_sync',
+          syncType: event.syncType,
+          messages: event.messages,
+          progress: event.progress,
+          isLatest: event.isLatest,
+        });
       },
     });
 
@@ -134,10 +143,15 @@ export class BridgeServer {
         throw new Error(`Rate limit exceeded: ${this.rateLimit} messages per minute`);
       }
 
-      // Block group sends
+      // Theorem T_GRPREADONLY: Block group/broadcast sends at bridge level (P_GRPGATE).
+      // Defense-in-depth: even if Python logic has a bug, the bridge refuses group sends
+      // unless explicitly owner-approved (e.g., for admin-initiated escalation responses).
       const to = cmd.to || '';
       if (to.endsWith('@g.us') || to.includes('@broadcast')) {
-        throw new Error('Group/broadcast sends blocked for safety');
+        if (!cmd.ownerApproved) {
+          throw new Error('Group/broadcast sends blocked. Use ownerApproved flag for admin-approved sends.');
+        }
+        console.log(`[AUDIT] Owner-approved group send to ${to}`);
       }
 
       this.sendCount++;
@@ -152,6 +166,10 @@ export class BridgeServer {
     } else if (cmd.type === 'delete' && this.wa) {
       await this.wa.deleteMessage(cmd.remoteJid, cmd.msgId, cmd.fromMe, cmd.participant);
       return { deleted: true, msgId: cmd.msgId };
+    } else if (cmd.type === 'fetch_history' && this.wa) {
+      const { chatJid, count } = cmd;
+      await this.wa.fetchMessageHistory(chatJid, count || 50);
+      return { fetching: true, chatJid };
     }
     return {};
   }

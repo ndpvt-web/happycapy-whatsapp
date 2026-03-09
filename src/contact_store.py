@@ -13,12 +13,17 @@ Injected into system prompt for personalized, context-aware replies.
 import asyncio
 import json
 import os
+import re
 import sqlite3
 import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+# Strip <reply> tags from assistant samples before storage.
+# Without this, FTS5 indexes tag noise and profile generation sees markup.
+_REPLY_TAG_RE = re.compile(r"</?reply(?:\s[^>]*)?>", re.IGNORECASE)
 
 try:
     import httpx
@@ -52,7 +57,8 @@ class ContactStore:
     """SQLite-backed contact profile store."""
 
     MIN_SAMPLES_FOR_PROFILE = 5  # Minimum messages before generating a profile
-    PROFILE_UPDATE_INTERVAL = 20  # Re-analyze after this many new messages
+    PROFILE_UPDATE_INTERVAL = 10  # Re-analyze after this many new messages
+    PROFILE_MAX_AGE_HOURS = 48   # Re-analyze if profile older than this (time-based trigger)
 
     # Theorem T_PROFSAN: Max chars for profile context injected into system prompt.
     # Bounds prompt injection surface from contact-manipulated profile data (P_PROMPTINJ).
@@ -113,19 +119,25 @@ class ContactStore:
         """)
         self._conn.commit()
 
+        self._init_group_tables()
+
     async def store_sample(self, jid: str, role: str, content: str, timestamp: str = "") -> None:
         """Store a conversation sample for future profile analysis.
 
         Uses _write_lock to serialize SQLite writes across concurrent asyncio tasks.
+        Strips <reply> tags from assistant responses to keep FTS5 clean.
         """
         if not content or len(content.strip()) < 2:
             return
+
+        # Strip <reply> tags from assistant responses before storage
+        clean = _REPLY_TAG_RE.sub("", content).strip() if role == "assistant" else content
 
         ts = timestamp or datetime.now().isoformat()
         async with self._write_lock:
             self._conn.execute(
                 "INSERT INTO conversation_samples (jid, role, content, timestamp) VALUES (?, ?, ?, ?)",
-                (jid, role, content[:2000], ts),
+                (jid, role, clean[:2000], ts),
             )
             self._conn.commit()
 
@@ -143,6 +155,17 @@ class ContactStore:
             (jid, limit),
         ).fetchall()
         return [{"role": r["role"], "content": r["content"], "timestamp": r["timestamp"]} for r in reversed(rows)]
+
+    def get_recent_samples_all(self, limit: int = 30) -> list[dict]:
+        """Get recent conversation samples across ALL contacts (for memory consolidation)."""
+        rows = self._conn.execute(
+            "SELECT jid, role, content, timestamp FROM conversation_samples ORDER BY timestamp DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [
+            {"role": r["role"], "content": r["content"], "timestamp": r["timestamp"]}
+            for r in reversed(rows)
+        ]
 
     def get_profile(self, jid: str) -> ContactProfile | None:
         """Get a contact's profile.
@@ -194,7 +217,12 @@ class ContactStore:
             self._conn.commit()
 
     def needs_profile_update(self, jid: str) -> bool:
-        """Check if a contact needs profile generation/update."""
+        """Check if a contact needs profile generation/update.
+
+        Triggers on either:
+        - Message count: PROFILE_UPDATE_INTERVAL new messages since last analysis
+        - Time-based: Profile older than PROFILE_MAX_AGE_HOURS with >= 3 new messages
+        """
         sample_count = self.get_sample_count(jid)
         if sample_count < self.MIN_SAMPLES_FOR_PROFILE:
             return False
@@ -204,7 +232,22 @@ class ContactStore:
             return True
 
         new_messages = sample_count - profile.total_messages_analyzed
-        return new_messages >= self.PROFILE_UPDATE_INTERVAL
+
+        # Message count trigger
+        if new_messages >= self.PROFILE_UPDATE_INTERVAL:
+            return True
+
+        # Time-based trigger: stale profile with some new data
+        if new_messages >= 3 and profile.last_updated:
+            try:
+                updated = datetime.fromisoformat(profile.last_updated)
+                age_hours = (datetime.now() - updated).total_seconds() / 3600
+                if age_hours >= self.PROFILE_MAX_AGE_HOURS:
+                    return True
+            except (ValueError, TypeError):
+                pass
+
+        return False
 
     async def generate_profile(
         self, jid: str, config: dict, client: "httpx.AsyncClient | None" = None,
@@ -378,6 +421,269 @@ Return ONLY valid JSON, no markdown or explanation."""
             if p:
                 profiles.append(p)
         return profiles
+
+    # ── Group Intelligence (sampled, lightweight) ──
+
+    # Rate limits to prevent group message floods from consuming storage/CPU.
+    # 500 samples per group = ~100KB max. 60s cooldown = max 1 sample/min/group.
+    _GROUP_MAX_SAMPLES = 500
+    _GROUP_SAMPLE_COOLDOWN = 60  # seconds between stored samples per group
+
+    def _init_group_tables(self) -> None:
+        """Create group-specific tables (called from _init_db)."""
+        self._conn.executescript("""
+            CREATE TABLE IF NOT EXISTS group_cards (
+                group_jid TEXT PRIMARY KEY,
+                group_name TEXT DEFAULT '',
+                member_count INTEGER DEFAULT 0,
+                active_members TEXT DEFAULT '[]',
+                topics TEXT DEFAULT '[]',
+                message_rate TEXT DEFAULT 'unknown',
+                last_active TEXT DEFAULT '',
+                card_json TEXT DEFAULT '{}',
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS group_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                group_jid TEXT NOT NULL,
+                sender_id TEXT NOT NULL,
+                content TEXT NOT NULL,
+                timestamp TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_group_samples_jid
+                ON group_samples(group_jid);
+            CREATE INDEX IF NOT EXISTS idx_group_samples_sender
+                ON group_samples(sender_id);
+        """)
+        # FTS5 virtual table for group message search
+        self._conn.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS group_samples_fts
+            USING fts5(content, content=group_samples, content_rowid=id, tokenize='porter')
+        """)
+        self._conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS group_samples_fts_insert AFTER INSERT ON group_samples
+            BEGIN INSERT INTO group_samples_fts(rowid, content) VALUES (new.id, new.content); END
+        """)
+        self._conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS group_samples_fts_delete AFTER DELETE ON group_samples
+            BEGIN INSERT INTO group_samples_fts(group_samples_fts, rowid, content) VALUES ('delete', old.id, old.content); END
+        """)
+        self._conn.commit()
+
+    async def store_group_sample(
+        self, group_jid: str, sender_id: str, content: str,
+        group_name: str = "", timestamp: str = "",
+    ) -> bool:
+        """Store a sampled group message (rate-limited, capped).
+
+        Returns True if stored, False if rate-limited or skipped.
+        Designed to handle hundreds of messages/sec without slowing down.
+        """
+        if not content or len(content.strip()) < 3:
+            return False
+
+        # Rate limit: check last sample time for this group
+        now = time.time()
+        cache_key = f"_grp_{group_jid}"
+        last_ts = getattr(self, cache_key, 0)
+        if now - last_ts < self._GROUP_SAMPLE_COOLDOWN:
+            return False
+        setattr(self, cache_key, now)
+
+        ts = timestamp or datetime.now().isoformat()
+        async with self._write_lock:
+            # Cap total samples per group (rolling window: delete oldest)
+            count = self._conn.execute(
+                "SELECT COUNT(*) as cnt FROM group_samples WHERE group_jid = ?",
+                (group_jid,),
+            ).fetchone()["cnt"]
+
+            if count >= self._GROUP_MAX_SAMPLES:
+                # Delete oldest 10% to make room
+                delete_count = max(self._GROUP_MAX_SAMPLES // 10, 1)
+                self._conn.execute(
+                    """DELETE FROM group_samples WHERE id IN (
+                        SELECT id FROM group_samples WHERE group_jid = ?
+                        ORDER BY id ASC LIMIT ?
+                    )""",
+                    (group_jid, delete_count),
+                )
+
+            # Store with truncated content (200 chars vs 2000 for DMs)
+            self._conn.execute(
+                "INSERT INTO group_samples (group_jid, sender_id, content, timestamp) VALUES (?, ?, ?, ?)",
+                (group_jid, sender_id, content[:200], ts),
+            )
+
+            # Upsert group card (touch last_active + name)
+            self._conn.execute("""
+                INSERT INTO group_cards (group_jid, group_name, last_active)
+                VALUES (?, ?, datetime('now'))
+                ON CONFLICT(group_jid) DO UPDATE SET
+                    group_name = CASE WHEN excluded.group_name != '' THEN excluded.group_name ELSE group_cards.group_name END,
+                    last_active = datetime('now'),
+                    updated_at = datetime('now')
+            """, (group_jid, group_name))
+
+            self._conn.commit()
+
+        # Cross-pollinate: also store as DM sample for the sender's contact profile.
+        # This way, contacts you know from groups build richer profiles.
+        await self.store_sample(sender_id, "user", content, ts)
+
+        return True
+
+    def get_group_card(self, group_jid: str) -> dict | None:
+        """Get a group's card info."""
+        row = self._conn.execute(
+            "SELECT * FROM group_cards WHERE group_jid = ?", (group_jid,)
+        ).fetchone()
+        if not row:
+            return None
+        return dict(row)
+
+    def get_group_active_members(self, group_jid: str, limit: int = 20) -> list[dict]:
+        """Get most active members in a group (by message count)."""
+        rows = self._conn.execute(
+            """SELECT sender_id, COUNT(*) as msg_count
+               FROM group_samples WHERE group_jid = ?
+               GROUP BY sender_id ORDER BY msg_count DESC LIMIT ?""",
+            (group_jid, limit),
+        ).fetchall()
+        result = []
+        for row in rows:
+            sid = row["sender_id"]
+            profile = self.get_profile(sid)
+            result.append({
+                "sender_id": sid,
+                "msg_count": row["msg_count"],
+                "display_name": profile.display_name if profile else "",
+                "has_profile": profile is not None,
+            })
+        return result
+
+    def get_all_group_cards(self) -> list[dict]:
+        """Get all group cards sorted by recent activity."""
+        rows = self._conn.execute(
+            "SELECT * FROM group_cards ORDER BY last_active DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def search_group_messages(self, query: str, group_jid: str = "", limit: int = 20) -> list[dict]:
+        """FTS5 keyword search across group messages.
+
+        Args:
+            query: Search terms.
+            group_jid: Optional - filter to specific group.
+            limit: Max results (default 20, max 50).
+
+        Returns:
+            List of dicts with: group_jid, sender_id, content, timestamp, rank.
+        """
+        limit = min(limit, 50)
+        try:
+            if group_jid:
+                rows = self._conn.execute(
+                    """SELECT gs.group_jid, gs.sender_id, gs.content, gs.timestamp,
+                              rank as relevance
+                       FROM group_samples_fts fts
+                       JOIN group_samples gs ON gs.id = fts.rowid
+                       WHERE group_samples_fts MATCH ? AND gs.group_jid = ?
+                       ORDER BY rank LIMIT ?""",
+                    (query, group_jid, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """SELECT gs.group_jid, gs.sender_id, gs.content, gs.timestamp,
+                              rank as relevance
+                       FROM group_samples_fts fts
+                       JOIN group_samples gs ON gs.id = fts.rowid
+                       WHERE group_samples_fts MATCH ?
+                       ORDER BY rank LIMIT ?""",
+                    (query, limit),
+                ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def get_recent_group_messages(self, group_jid: str = "", limit: int = 20) -> list[dict]:
+        """Get recent group messages, optionally filtered by group.
+
+        Args:
+            group_jid: Optional - filter to specific group.
+            limit: Max results (default 20, max 50).
+
+        Returns:
+            List of dicts with: group_jid, sender_id, content, timestamp.
+        """
+        limit = min(limit, 50)
+        try:
+            if group_jid:
+                rows = self._conn.execute(
+                    """SELECT group_jid, sender_id, content, timestamp
+                       FROM group_samples WHERE group_jid = ?
+                       ORDER BY id DESC LIMIT ?""",
+                    (group_jid, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """SELECT group_jid, sender_id, content, timestamp
+                       FROM group_samples
+                       ORDER BY id DESC LIMIT ?""",
+                    (limit,),
+                ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def resolve_group_by_name(self, partial_name: str) -> str | None:
+        """Resolve a partial group name to a group_jid (case-insensitive).
+
+        Returns the JID if a unique match is found, None otherwise.
+        """
+        try:
+            rows = self._conn.execute(
+                "SELECT group_jid, group_name FROM group_cards WHERE LOWER(group_name) LIKE ?",
+                (f"%{partial_name.lower()}%",),
+            ).fetchall()
+            if len(rows) == 1:
+                return rows[0]["group_jid"]
+            return None
+        except Exception:
+            return None
+
+    def prune_old_samples(self, keep_last: int = 5000) -> int:
+        """Prune old conversation samples, keeping the last N per contact.
+
+        Returns the total number of deleted rows.
+        """
+        try:
+            # Get all distinct JIDs
+            jids = [r[0] for r in self._conn.execute(
+                "SELECT DISTINCT jid FROM conversation_samples"
+            ).fetchall()]
+
+            total_deleted = 0
+            for jid in jids:
+                count = self.get_sample_count(jid)
+                if count > keep_last:
+                    # Delete oldest entries beyond keep_last
+                    cursor = self._conn.execute(
+                        """DELETE FROM conversation_samples WHERE id IN (
+                            SELECT id FROM conversation_samples WHERE jid = ?
+                            ORDER BY timestamp ASC LIMIT ?
+                        )""",
+                        (jid, count - keep_last),
+                    )
+                    total_deleted += cursor.rowcount
+            if total_deleted > 0:
+                self._conn.commit()
+            return total_deleted
+        except Exception:
+            return 0
 
     def close(self) -> None:
         """Close the database connection."""

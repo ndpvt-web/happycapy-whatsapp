@@ -26,10 +26,33 @@ export interface InboundMessage {
   content: string;
   timestamp: number;
   isGroup: boolean;
+  fromMe: boolean;
+  participant?: string;       // Actual sender JID in group messages
+  mentionedJids?: string[];   // @mentioned JIDs in the message
+  groupSubject?: string;      // Group name/subject
+  quotedMessageId?: string;   // stanzaId of the quoted/replied-to message
+  quotedParticipant?: string; // JID of who sent the quoted message
+  quotedContent?: string;     // Text content of the quoted message
   media_base64?: string;
   media_type?: string;
   media_mimetype?: string;
   media_filename?: string;
+}
+
+export interface HistorySyncEvent {
+  syncType: number;       // 0=INITIAL_BOOTSTRAP, 2=FULL, 3=RECENT, 6=ON_DEMAND
+  messages: Array<{
+    id: string;
+    chatJid: string;
+    content: string;
+    timestamp: number;
+    fromMe: boolean;
+    isGroup: boolean;
+    participant?: string;
+    pushName?: string;
+  }>;
+  progress: number | null;
+  isLatest: boolean;
 }
 
 export interface WhatsAppClientOptions {
@@ -37,6 +60,7 @@ export interface WhatsAppClientOptions {
   onMessage: (msg: InboundMessage) => void;
   onQR: (qr: string) => void;
   onStatus: (status: string) => void;
+  onHistorySync?: (event: HistorySyncEvent) => void;
 }
 
 export class WhatsAppClient {
@@ -64,7 +88,7 @@ export class WhatsAppClient {
       logger,
       printQRInTerminal: false,
       browser: ['HappyCapy', 'WhatsApp', VERSION],
-      syncFullHistory: false,
+      syncFullHistory: true,
       markOnlineOnConnect: false,
     });
 
@@ -106,17 +130,56 @@ export class WhatsAppClient {
 
     this.sock.ev.on('creds.update', saveCreds);
 
+    // History sync: receive older messages on connection (syncFullHistory: true)
+    this.sock.ev.on('messaging-history.set', (data: any) => {
+      const { messages, isLatest, progress, syncType } = data;
+      if (!messages || messages.length === 0) return;
+
+      console.log(`History sync: ${messages.length} msgs, type=${syncType}, progress=${progress}, isLatest=${isLatest}`);
+
+      if (this.options.onHistorySync) {
+        const parsed: HistorySyncEvent['messages'] = [];
+        for (const msg of messages) {
+          const content = this.extractMessageContent(msg);
+          if (!content) continue;
+
+          const chatJid = msg.key?.remoteJid || '';
+          if (chatJid === 'status@broadcast') continue;
+
+          parsed.push({
+            id: msg.key?.id || '',
+            chatJid,
+            content,
+            timestamp: (msg.messageTimestamp as number) || 0,
+            fromMe: msg.key?.fromMe || false,
+            isGroup: chatJid.endsWith('@g.us'),
+            participant: msg.key?.participant || '',
+            pushName: msg.pushName || '',
+          });
+        }
+
+        if (parsed.length > 0) {
+          this.options.onHistorySync({
+            syncType: syncType || 0,
+            messages: parsed,
+            progress: progress ?? null,
+            isLatest: isLatest || false,
+          });
+        }
+      }
+    });
+
     this.sock.ev.on('messages.upsert', async ({ messages, type }: { messages: any[]; type: string }) => {
       if (type !== 'notify') return;
 
       for (const msg of messages) {
-        if (msg.key.fromMe) continue;
         if (msg.key.remoteJid === 'status@broadcast') continue;
 
         const content = this.extractMessageContent(msg);
         if (!content && !this.hasMedia(msg)) continue;
 
         const isGroup = msg.key.remoteJid?.endsWith('@g.us') || false;
+        const fromMe = msg.key.fromMe || false;
 
         const inbound: InboundMessage = {
           id: msg.key.id || '',
@@ -125,7 +188,40 @@ export class WhatsAppClient {
           content: content || '',
           timestamp: msg.messageTimestamp as number,
           isGroup,
+          fromMe,
         };
+
+        // Extract contextInfo (available on multiple message types)
+        const contextInfo = msg.message?.extendedTextMessage?.contextInfo
+          || msg.message?.imageMessage?.contextInfo
+          || msg.message?.videoMessage?.contextInfo
+          || msg.message?.documentMessage?.contextInfo
+          || msg.message?.audioMessage?.contextInfo;
+
+        // Group-specific metadata: actual sender + @mentions
+        if (isGroup) {
+          inbound.participant = msg.key.participant || '';
+          if (contextInfo?.mentionedJid) {
+            inbound.mentionedJids = contextInfo.mentionedJid;
+          }
+        }
+
+        // Quoted/reply message tracking (works for both DMs and groups)
+        if (contextInfo?.quotedMessage) {
+          inbound.quotedMessageId = contextInfo.stanzaId || '';
+          inbound.quotedParticipant = contextInfo.participant || '';
+          const qm = contextInfo.quotedMessage;
+          inbound.quotedContent = qm.conversation
+            || qm.extendedTextMessage?.text
+            || qm.imageMessage?.caption
+            || qm.videoMessage?.caption
+            || (qm.audioMessage ? '[Voice Message]' : undefined)
+            || (qm.imageMessage ? '[Image]' : undefined)
+            || (qm.videoMessage ? '[Video]' : undefined)
+            || (qm.documentMessage ? '[Document]' : undefined)
+            || (qm.stickerMessage ? '[Sticker]' : undefined)
+            || '';
+        }
 
         // Extract media if present
         const mediaInfo = await this.extractMedia(msg);
@@ -232,6 +328,18 @@ export class WhatsAppClient {
     const key: any = { remoteJid, id: msgId, fromMe };
     if (participant) key.participant = participant;
     await this.sock.sendMessage(remoteJid, { delete: key });
+  }
+
+  async fetchMessageHistory(chatJid: string, count: number = 50): Promise<void> {
+    if (!this.sock) throw new Error('Not connected');
+    // Use Baileys chatModify to request on-demand history
+    // Results arrive via messaging-history.set event
+    try {
+      await this.sock.fetchMessageHistory(count, { remoteJid: chatJid }, null);
+      console.log(`Requested ${count} history messages for ${chatJid}`);
+    } catch (err) {
+      console.error('fetchMessageHistory failed:', err);
+    }
   }
 
   async disconnect(): Promise<void> {

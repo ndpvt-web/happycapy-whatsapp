@@ -118,6 +118,7 @@ class BridgeManager:
                     print("WhatsApp connected!")
                 elif status == "disconnected":
                     self._connected = False
+                    qr_state.set_disconnected()
                     print("WhatsApp disconnected")
 
             else:
