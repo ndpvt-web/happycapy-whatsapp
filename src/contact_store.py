@@ -36,6 +36,9 @@ class ContactProfile:
     """Per-contact communication profile."""
     jid: str = ""
     display_name: str = ""
+    push_name: str = ""           # WhatsApp self-set display name (from pushName)
+    saved_name: str = ""          # Name saved in user's phone book (from contacts sync)
+    verified_name: str = ""       # Verified business name (from WhatsApp Business)
     tone: str = "neutral"  # casual, formal, mixed, neutral
     formality: float = 0.5  # 0.0 = very casual, 1.0 = very formal
     emoji_usage: str = "moderate"  # none, rare, moderate, frequent
@@ -51,6 +54,14 @@ class ContactProfile:
     total_messages_analyzed: int = 0
     last_updated: str = ""
     profile_version: int = 0
+
+    @property
+    def best_name(self) -> str:
+        """Return the best available name for this contact.
+
+        Priority: saved_name > display_name > push_name > verified_name > jid
+        """
+        return self.saved_name or self.display_name or self.push_name or self.verified_name or self.jid
 
 
 class ContactStore:
@@ -116,8 +127,26 @@ class ContactStore:
                 change_summary TEXT NOT NULL,
                 changed_at TEXT DEFAULT (datetime('now'))
             );
+
+            -- WhatsApp contact directory: synced from Baileys contact events
+            CREATE TABLE IF NOT EXISTS whatsapp_contacts (
+                jid TEXT PRIMARY KEY,
+                push_name TEXT DEFAULT '',
+                saved_name TEXT DEFAULT '',
+                verified_name TEXT DEFAULT '',
+                updated_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_wa_contacts_push ON whatsapp_contacts(push_name)
+                WHERE push_name != '';
+            CREATE INDEX IF NOT EXISTS idx_wa_contacts_saved ON whatsapp_contacts(saved_name)
+                WHERE saved_name != '';
         """)
         self._conn.commit()
+
+        # In-memory name cache: jid -> (push_name, saved_name, verified_name)
+        self._name_cache: dict[str, tuple[str, str, str]] = {}
+        self._load_name_cache()
 
         self._init_group_tables()
 
@@ -439,6 +468,178 @@ Return ONLY valid JSON, no markdown or explanation."""
             if p:
                 profiles.append(p)
         return profiles
+
+    # ── WhatsApp Contact Directory ──
+
+    def _load_name_cache(self) -> None:
+        """Load WhatsApp contact names into memory for fast lookup."""
+        try:
+            rows = self._conn.execute(
+                "SELECT jid, push_name, saved_name, verified_name FROM whatsapp_contacts"
+            ).fetchall()
+            for r in rows:
+                jid = r["jid"].split("@")[0] if "@" in r["jid"] else r["jid"]
+                self._name_cache[jid] = (r["push_name"], r["saved_name"], r["verified_name"])
+        except Exception:
+            pass  # Table may not exist yet on first run
+
+    def update_whatsapp_name(self, jid: str, push_name: str = "",
+                              saved_name: str = "", verified_name: str = "") -> None:
+        """Update WhatsApp contact name (from pushName on messages or contact sync).
+
+        This is called on every incoming message with pushName data, and during
+        contact sync events. Only updates fields that have non-empty values.
+        """
+        bare_jid = jid.split("@")[0] if "@" in jid else jid
+
+        # Merge with existing cache
+        existing = self._name_cache.get(bare_jid, ("", "", ""))
+        new_push = push_name or existing[0]
+        new_saved = saved_name or existing[1]
+        new_verified = verified_name or existing[2]
+
+        # Skip if nothing changed
+        if (new_push, new_saved, new_verified) == existing:
+            return
+
+        self._name_cache[bare_jid] = (new_push, new_saved, new_verified)
+
+        # Persist to DB
+        try:
+            self._conn.execute("""
+                INSERT INTO whatsapp_contacts (jid, push_name, saved_name, verified_name, updated_at)
+                VALUES (?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(jid) DO UPDATE SET
+                    push_name = CASE WHEN ? != '' THEN ? ELSE whatsapp_contacts.push_name END,
+                    saved_name = CASE WHEN ? != '' THEN ? ELSE whatsapp_contacts.saved_name END,
+                    verified_name = CASE WHEN ? != '' THEN ? ELSE whatsapp_contacts.verified_name END,
+                    updated_at = datetime('now')
+            """, (bare_jid, new_push, new_saved, new_verified,
+                  push_name, push_name, saved_name, saved_name, verified_name, verified_name))
+            self._conn.commit()
+        except Exception as e:
+            print(f"[contacts] Failed to update name for {bare_jid}: {e}")
+
+    async def sync_contacts(self, contacts: list[dict]) -> int:
+        """Bulk sync contacts from Baileys contact events.
+
+        Args:
+            contacts: List of dicts with keys: jid, name, notify, verifiedName
+
+        Returns:
+            Number of contacts synced.
+        """
+        count = 0
+        async with self._write_lock:
+            for c in contacts:
+                jid = c.get("jid", "")
+                if not jid or jid.endswith("@g.us") or jid == "status@broadcast":
+                    continue
+                bare_jid = jid.split("@")[0] if "@" in jid else jid
+                push_name = c.get("notify", "")
+                saved_name = c.get("name", "")
+                verified_name = c.get("verifiedName", "")
+
+                if not any([push_name, saved_name, verified_name]):
+                    continue
+
+                self.update_whatsapp_name(bare_jid, push_name, saved_name, verified_name)
+                count += 1
+        return count
+
+    def get_contact_name(self, jid: str) -> str:
+        """Get the best known name for a contact (fast, from cache).
+
+        Priority: saved_name > push_name > verified_name > profile display_name > jid
+        """
+        bare_jid = jid.split("@")[0] if "@" in jid else jid
+        cached = self._name_cache.get(bare_jid)
+        if cached:
+            name = cached[1] or cached[0] or cached[2]  # saved > push > verified
+            if name:
+                return name
+        # Fallback to profile display_name
+        profile = self.get_profile(bare_jid)
+        if profile and profile.display_name:
+            return profile.display_name
+        return bare_jid
+
+    def resolve_contact_by_name(self, query: str, limit: int = 5) -> list[dict]:
+        """Find contacts by partial name match (case-insensitive).
+
+        Searches across: saved_name, push_name, verified_name, profile display_name.
+        Returns list of dicts: {jid, name, name_source, push_name, saved_name}.
+        """
+        results = []
+        query_lower = query.lower()
+
+        # Search WhatsApp contacts table
+        try:
+            rows = self._conn.execute(
+                """SELECT jid, push_name, saved_name, verified_name FROM whatsapp_contacts
+                   WHERE LOWER(push_name) LIKE ? OR LOWER(saved_name) LIKE ? OR LOWER(verified_name) LIKE ?
+                   LIMIT ?""",
+                (f"%{query_lower}%", f"%{query_lower}%", f"%{query_lower}%", limit),
+            ).fetchall()
+            for r in rows:
+                best = r["saved_name"] or r["push_name"] or r["verified_name"]
+                source = "saved" if r["saved_name"] else ("push" if r["push_name"] else "verified")
+                results.append({
+                    "jid": r["jid"],
+                    "name": best,
+                    "name_source": source,
+                    "push_name": r["push_name"],
+                    "saved_name": r["saved_name"],
+                })
+        except Exception:
+            pass
+
+        # Also search profile display names if we have room
+        if len(results) < limit:
+            try:
+                rows = self._conn.execute(
+                    """SELECT jid, display_name FROM contact_profiles
+                       WHERE LOWER(display_name) LIKE ? AND display_name != ''
+                       LIMIT ?""",
+                    (f"%{query_lower}%", limit - len(results)),
+                ).fetchall()
+                seen_jids = {r["jid"] for r in results}
+                for r in rows:
+                    if r["jid"] not in seen_jids:
+                        results.append({
+                            "jid": r["jid"],
+                            "name": r["display_name"],
+                            "name_source": "profile",
+                            "push_name": "",
+                            "saved_name": "",
+                        })
+            except Exception:
+                pass
+
+        return results
+
+    def get_all_whatsapp_contacts(self) -> list[dict]:
+        """Get all known WhatsApp contacts with names."""
+        try:
+            rows = self._conn.execute(
+                """SELECT jid, push_name, saved_name, verified_name, updated_at
+                   FROM whatsapp_contacts
+                   WHERE push_name != '' OR saved_name != '' OR verified_name != ''
+                   ORDER BY updated_at DESC"""
+            ).fetchall()
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    def get_whatsapp_contact_count(self) -> int:
+        """Get count of contacts with at least one name."""
+        try:
+            row = self._conn.execute(
+                "SELECT COUNT(*) as cnt FROM whatsapp_contacts WHERE push_name != '' OR saved_name != '' OR verified_name != ''"
+            ).fetchone()
+            return row["cnt"] if row else 0
+        except Exception:
+            return 0
 
     # ── Group Intelligence (sampled, lightweight) ──
 

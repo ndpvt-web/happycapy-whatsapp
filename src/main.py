@@ -62,6 +62,10 @@ from src.reflection_engine import ReflectionEngine
 from src.cron_service import CronService
 from src.session_manager import SessionManager
 from src.tool_executor import ToolExecutor, ToolResult, TOOL_DEFINITIONS
+from src.broadcast import (
+    create_broadcast_engine, BroadcastEngine, BroadcastIntegration,
+    CampaignStore, AUTO_SEGMENTS,
+)
 
 try:
     import httpx
@@ -87,7 +91,7 @@ class AIResponse:
 SETUP_QUESTIONS = [
     {
         "id": "admin_number",
-        "question": "What is your WhatsApp phone number? This registers you as the admin who can control the bot via WhatsApp commands (e.g. /status, /pause, /block).",
+        "question": "What is your WhatsApp phone number? (digits only, e.g. 14155551234). This lets you control the bot via /commands in WhatsApp.",
         "header": "Admin",
         "options": [
             {"label": "Enter my number", "value": "enter",
@@ -97,131 +101,29 @@ SETUP_QUESTIONS = [
         ],
     },
     {
+        "id": "owner_name",
+        "question": "What's your name? (Used when the bot replies as you, e.g. 'Hey, it's John')",
+        "header": "Your Name",
+        "options": [
+            {"label": "Enter my name", "value": "enter",
+             "description": "Your first name or nickname for natural-sounding replies"},
+            {"label": "Skip", "value": "skip",
+             "description": "Bot will reply without using a name"},
+        ],
+    },
+    {
         "id": "purpose",
-        "question": "What will you primarily use WhatsApp automation for?",
+        "question": "What will you use this for? (Smart defaults are set based on your choice - you can change everything later via /commands)",
         "header": "Purpose",
         "options": [
             {"label": "Personal Assistant (Recommended)", "value": "personal_assistant",
-             "description": "Auto-reply to personal messages with AI-powered responses"},
+             "description": "Replies as you, casual tone, strict privacy. Best for personal WhatsApp."},
             {"label": "Business Support", "value": "business_support",
-             "description": "Handle customer inquiries and business communications"},
+             "description": "Professional tone, spreadsheet+email integrations, handles customer inquiries."},
             {"label": "Team Coordination", "value": "team_coordination",
-             "description": "Help coordinate team activities and reminders"},
+             "description": "Friendly tone, reminders, team activity coordination."},
             {"label": "Monitoring Only", "value": "monitoring_only",
-             "description": "Just log messages, never send replies"},
-        ],
-    },
-    {
-        "id": "personality_mode",
-        "question": "How should the bot behave when replying to your contacts?",
-        "header": "Personality",
-        "options": [
-            {"label": "Act as me (Recommended)", "value": "impersonate",
-             "description": "Reply AS you — contacts won't know it's AI. Never reveals it's a bot. Asks you when unsure."},
-            {"label": "Act as my assistant", "value": "assistant",
-             "description": "Reply as an AI assistant on your behalf. Contacts know it's automated."},
-        ],
-    },
-    {
-        "id": "privacy_level",
-        "question": "How should the bot handle private information between contacts?",
-        "header": "Privacy",
-        "options": [
-            {"label": "Strict (Recommended)", "value": "strict",
-             "description": "Never share info from one contact with another. Ask owner if unsure about sharing anything."},
-            {"label": "Moderate", "value": "moderate",
-             "description": "Share general info but protect private details (finances, health, relationships)."},
-            {"label": "Open", "value": "open",
-             "description": "Share freely across contacts (use only if all contacts are trusted)."},
-        ],
-    },
-    {
-        "id": "fabrication_policy",
-        "question": "What should the bot do when it doesn't know something?",
-        "header": "Unknown Info",
-        "options": [
-            {"label": "Ask owner (Recommended)", "value": "strict",
-             "description": "Never guess or make up details. Always ask the owner for unknown info."},
-            {"label": "Deflect casually", "value": "deflect",
-             "description": "Deflect with 'lemme check' or 'I'll get back to you' without asking owner."},
-            {"label": "Best effort", "value": "relaxed",
-             "description": "Try to answer from context, only ask owner for clearly unknown specifics."},
-        ],
-    },
-    {
-        "id": "tone",
-        "question": "What tone should be used when replying?",
-        "header": "Tone",
-        "options": [
-            {"label": "Casual & Friendly (Recommended)", "value": "casual_friendly",
-             "description": "Relaxed, conversational tone like texting a friend"},
-            {"label": "Professional", "value": "professional",
-             "description": "Formal and business-appropriate language"},
-            {"label": "Concise & Direct", "value": "concise_direct",
-             "description": "Short, to-the-point responses with no filler"},
-            {"label": "Warm & Empathetic", "value": "warm_empathetic",
-             "description": "Caring and understanding tone"},
-        ],
-    },
-    {
-        "id": "mode",
-        "question": "How should the bot handle incoming messages?",
-        "header": "Reply Mode",
-        "options": [
-            {"label": "Auto-Reply (Recommended)", "value": "auto_reply",
-             "description": "Automatically respond to allowed contacts"},
-            {"label": "Ask Before Replying", "value": "ask_before_reply",
-             "description": "Show the message and proposed reply, wait for approval"},
-            {"label": "Monitor Only", "value": "monitor_only",
-             "description": "Log all messages but never send any replies"},
-        ],
-    },
-    {
-        "id": "contact_access",
-        "question": "Who should the bot respond to?",
-        "header": "Contacts",
-        "options": [
-            {"label": "Everyone (Recommended)", "value": "everyone",
-             "description": "Respond to all personal chat messages"},
-            {"label": "Specific Contacts Only", "value": "allowlist",
-             "description": "Only respond to contacts you specify"},
-            {"label": "Everyone Except...", "value": "blocklist",
-             "description": "Respond to all except contacts you block"},
-        ],
-    },
-    {
-        "id": "voice",
-        "question": "How should voice messages be handled?",
-        "header": "Voice",
-        "options": [
-            {"label": "Transcribe (Recommended)", "value": "transcribe",
-             "description": "Convert voice messages to text using AI transcription"},
-            {"label": "Acknowledge Only", "value": "placeholder",
-             "description": "Note that a voice message was received without transcribing"},
-            {"label": "Ignore", "value": "ignore",
-             "description": "Skip voice messages entirely"},
-        ],
-    },
-    {
-        "id": "media",
-        "question": "How should images, videos, and documents be handled?",
-        "header": "Media",
-        "options": [
-            {"label": "Acknowledge Only (Recommended)", "value": "acknowledge",
-             "description": "Note media was received and describe it if possible"},
-            {"label": "Ignore", "value": "ignore",
-             "description": "Skip messages that only contain media"},
-        ],
-    },
-    {
-        "id": "group_policy",
-        "question": "How should group messages be handled?",
-        "header": "Groups",
-        "options": [
-            {"label": "Monitor Only (Recommended)", "value": "monitor",
-             "description": "Log group messages but never auto-reply (safest)"},
-            {"label": "Ignore Completely", "value": "ignore",
-             "description": "Don't even log group messages"},
+             "description": "Just logs messages, never sends any replies."},
         ],
     },
     {
@@ -241,55 +143,285 @@ SETUP_QUESTIONS = [
     },
 ]
 
+# Business type selection -- shown when user picks "Business Support" as purpose
+BUSINESS_TYPE_QUESTION = {
+    "id": "business_type",
+    "question": "What type of business do you run? This auto-configures tone, vocabulary, workflows, and response patterns. (Pick the closest match -- you can customize everything later.)",
+    "header": "Business Type",
+    "options": [
+        {"label": "Food & Restaurant",
+         "value": "food_restaurant",
+         "description": "Menu sharing, order-taking, delivery time estimates. E.g. restaurant, cafe, bakery, cloud kitchen."},
+        {"label": "Beauty & Wellness",
+         "value": "beauty_wellness",
+         "description": "Appointment booking, service menu, availability. E.g. salon, spa, barbershop, nail studio."},
+        {"label": "Retail & Shop",
+         "value": "retail_shop",
+         "description": "Product catalog, stock checks, order processing. E.g. clothing, electronics, grocery, pharmacy."},
+        {"label": "Professional Services",
+         "value": "professional_services",
+         "description": "Client intake, scheduling, quotes. E.g. lawyer, accountant, consultant, freelancer."},
+    ],
+    # Additional types available via "Other" free-text:
+    # healthcare, real_estate, travel_hospitality, education, home_services, custom_other
+    # User can type the name and we'll fuzzy-match to a template ID.
+}
+
+# Extended business types -- matched from free-text "Other" input
+_BUSINESS_TYPE_ALIASES: dict[str, str] = {
+    # Direct IDs
+    "food_restaurant": "food_restaurant",
+    "beauty_wellness": "beauty_wellness",
+    "retail_shop": "retail_shop",
+    "professional_services": "professional_services",
+    "healthcare": "healthcare",
+    "real_estate": "real_estate",
+    "travel_hospitality": "travel_hospitality",
+    "education": "education",
+    "home_services": "home_services",
+    "custom_other": "custom_other",
+    # Keyword matches
+    "food": "food_restaurant", "restaurant": "food_restaurant", "cafe": "food_restaurant",
+    "bakery": "food_restaurant", "kitchen": "food_restaurant", "catering": "food_restaurant",
+    "delivery": "food_restaurant",
+    "beauty": "beauty_wellness", "salon": "beauty_wellness", "spa": "beauty_wellness",
+    "barber": "beauty_wellness", "nail": "beauty_wellness", "hair": "beauty_wellness",
+    "massage": "beauty_wellness", "skincare": "beauty_wellness",
+    "retail": "retail_shop", "shop": "retail_shop", "store": "retail_shop",
+    "clothing": "retail_shop", "electronics": "retail_shop", "grocery": "retail_shop",
+    "pharmacy": "retail_shop",
+    "professional": "professional_services", "lawyer": "professional_services",
+    "accountant": "professional_services", "consultant": "professional_services",
+    "agency": "professional_services", "freelance": "professional_services",
+    "architect": "professional_services", "consulting": "professional_services",
+    "health": "healthcare", "doctor": "healthcare", "clinic": "healthcare",
+    "dentist": "healthcare", "hospital": "healthcare", "medical": "healthcare",
+    "physio": "healthcare", "vet": "healthcare", "veterinary": "healthcare",
+    "real estate": "real_estate", "property": "real_estate", "rental": "real_estate",
+    "broker": "real_estate", "housing": "real_estate", "apartment": "real_estate",
+    "travel": "travel_hospitality", "hotel": "travel_hospitality", "hostel": "travel_hospitality",
+    "tour": "travel_hospitality", "airbnb": "travel_hospitality", "guesthouse": "travel_hospitality",
+    "hospitality": "travel_hospitality",
+    "education": "education", "school": "education", "tutor": "education",
+    "coaching": "education", "training": "education", "course": "education",
+    "music school": "education", "academy": "education",
+    "plumber": "home_services", "electrician": "home_services", "cleaning": "home_services",
+    "pest control": "home_services", "repair": "home_services", "painting": "home_services",
+    "handyman": "home_services", "ac repair": "home_services", "maintenance": "home_services",
+    "home service": "home_services", "home services": "home_services",
+    "custom": "custom_other", "other": "custom_other", "general": "custom_other",
+}
+
+
+def resolve_business_type(user_input: str) -> str:
+    """Resolve user input to a business template ID.
+
+    Handles direct IDs, preset option values, and fuzzy keyword matching.
+    Falls back to 'custom_other' if no match.
+    """
+    if not user_input:
+        return "custom_other"
+    cleaned = user_input.strip().lower()
+    # Direct match
+    if cleaned in _BUSINESS_TYPE_ALIASES:
+        return _BUSINESS_TYPE_ALIASES[cleaned]
+    # Keyword search -- find the first keyword that appears in the input
+    for keyword, template_id in _BUSINESS_TYPE_ALIASES.items():
+        if keyword in cleaned:
+            return template_id
+    return "custom_other"
+
+
+# Advanced settings shown only if user chooses to customize after seeing defaults
+ADVANCED_QUESTIONS = [
+    {
+        "id": "personality_mode",
+        "question": "How should the bot behave when replying to your contacts?",
+        "header": "Personality",
+        "options": [
+            {"label": "Act as me (Recommended)", "value": "impersonate",
+             "description": "Reply AS you -- contacts won't know it's AI. Never reveals it's a bot."},
+            {"label": "Act as my assistant", "value": "assistant",
+             "description": "Reply as an AI assistant on your behalf. Contacts know it's automated."},
+        ],
+    },
+    {
+        "id": "tone",
+        "question": "What tone should be used when replying?",
+        "header": "Tone",
+        "options": [
+            {"label": "Casual & Friendly", "value": "casual_friendly",
+             "description": "Relaxed, conversational tone like texting a friend"},
+            {"label": "Professional", "value": "professional",
+             "description": "Formal and business-appropriate language"},
+            {"label": "Concise & Direct", "value": "concise_direct",
+             "description": "Short, to-the-point responses with no filler"},
+            {"label": "Warm & Empathetic", "value": "warm_empathetic",
+             "description": "Caring and understanding tone"},
+        ],
+    },
+    {
+        "id": "mode",
+        "question": "How should the bot handle incoming messages?",
+        "header": "Reply Mode",
+        "options": [
+            {"label": "Auto-Reply", "value": "auto_reply",
+             "description": "Automatically respond to allowed contacts"},
+            {"label": "Ask Before Replying", "value": "ask_before_reply",
+             "description": "Show the message and proposed reply, wait for your approval"},
+            {"label": "Monitor Only", "value": "monitor_only",
+             "description": "Log all messages but never send any replies"},
+        ],
+    },
+    {
+        "id": "privacy_level",
+        "question": "How should the bot handle private information between contacts?",
+        "header": "Privacy",
+        "options": [
+            {"label": "Strict (Recommended)", "value": "strict",
+             "description": "Never share info from one contact with another"},
+            {"label": "Moderate", "value": "moderate",
+             "description": "Share general info but protect private details"},
+            {"label": "Open", "value": "open",
+             "description": "Share freely (only if all contacts are trusted)"},
+        ],
+    },
+]
+
+
+# Readable labels for config values (used in defaults summary)
+_DISPLAY_LABELS = {
+    "personality_mode": {"impersonate": "Act as you", "assistant": "AI Assistant"},
+    "tone": {"casual_friendly": "Casual & Friendly", "professional": "Professional",
+             "concise_direct": "Concise & Direct", "warm_empathetic": "Warm & Empathetic"},
+    "mode": {"auto_reply": "Auto-Reply", "ask_before_reply": "Ask Before Replying",
+             "monitor_only": "Monitor Only"},
+    "privacy_level": {"strict": "Strict", "moderate": "Moderate", "open": "Open"},
+    "purpose": {"personal_assistant": "Personal Assistant", "business_support": "Business Support",
+                "team_coordination": "Team Coordination", "monitoring_only": "Monitoring Only"},
+}
+
+
+def get_defaults_summary(config: dict) -> str:
+    """Build a human-readable summary of the smart defaults for review.
+
+    Shown to the user after core questions so they can approve or customize.
+    """
+    def _label(field: str, value: str) -> str:
+        return _DISPLAY_LABELS.get(field, {}).get(value, value)
+
+    lines = [
+        "*Your Settings*\n",
+        f"Purpose: {_label('purpose', config.get('purpose', ''))}",
+    ]
+    # Show business template if active
+    biz_template = config.get("business_template", "")
+    if biz_template:
+        from src.business_templates import get_template
+        tmpl = get_template(biz_template)
+        if tmpl:
+            lines.append(f"Business Type: {tmpl['name']} -- {tmpl['description']}")
+    lines.extend([
+        f"Personality: {_label('personality_mode', config.get('personality_mode', ''))}",
+        f"Tone: {_label('tone', config.get('tone', ''))}",
+        f"Mode: {_label('mode', config.get('mode', ''))}",
+        f"Privacy: {_label('privacy_level', config.get('privacy_level', ''))}",
+        f"Voice messages: {'Transcribe' if config.get('voice_transcription') else 'Ignore'}",
+        f"Groups: {'Monitor' if config.get('group_policy') == 'monitor' else 'Ignore'}",
+    ])
+    integrations = config.get("enabled_integrations", ["core"])
+    non_core = [i for i in integrations if i != "core"]
+    if non_core:
+        lines.append(f"Integrations: {', '.join(i.title() for i in non_core)}")
+    else:
+        lines.append("Integrations: None (core AI only)")
+
+    return "\n".join(lines)
+
 
 def map_answers_to_config(answers: dict[str, str]) -> dict:
-    """Map wizard answers to config fields."""
+    """Map wizard answers to config fields with smart defaults based on purpose.
+
+    Core questions (4) set defaults; advanced overrides apply on top if provided.
+    All defaults can be changed later via /commands.
+    """
     config = dict(DEFAULT_CONFIG)
 
-    config["purpose"] = answers.get("purpose", "personal_assistant")
-    config["personality_mode"] = answers.get("personality_mode", "impersonate")
-    config["privacy_level"] = answers.get("privacy_level", "strict")
-    config["fabrication_policy"] = answers.get("fabrication_policy", "strict")
-    config["tone"] = answers.get("tone", "casual_friendly")
-    config["mode"] = answers.get("mode", "auto_reply")
-    config["group_policy"] = answers.get("group_policy", "monitor")
+    purpose = answers.get("purpose", "personal_assistant")
+    config["purpose"] = purpose
 
-    # In impersonation mode, disable auto-alerts (bot uses ask_owner tool instead)
-    if config["personality_mode"] == "impersonate":
+    # Smart defaults based on purpose (Axiom A_ONBOARD: minimize questions)
+    if purpose == "personal_assistant":
+        config["personality_mode"] = "impersonate"
+        config["tone"] = "casual_friendly"
+        config["mode"] = "auto_reply"
+        config["privacy_level"] = "strict"
+        config["alert_on_auto_reply"] = False
+    elif purpose == "business_support":
+        config["personality_mode"] = "assistant"
+        config["tone"] = "professional"
+        config["mode"] = "auto_reply"
+        config["privacy_level"] = "strict"
+        config["alert_on_auto_reply"] = True
+    elif purpose == "team_coordination":
+        config["personality_mode"] = "assistant"
+        config["tone"] = "casual_friendly"
+        config["mode"] = "auto_reply"
+        config["privacy_level"] = "moderate"
+        config["alert_on_auto_reply"] = True
+    elif purpose == "monitoring_only":
+        config["personality_mode"] = "assistant"
+        config["tone"] = "concise_direct"
+        config["mode"] = "monitor_only"
+        config["privacy_level"] = "strict"
         config["alert_on_auto_reply"] = False
 
-    # Contact access
-    contact_access = answers.get("contact_access", "everyone")
-    if contact_access == "allowlist":
-        phones = answers.get("allowlist_phones", "")
-        config["allowlist"] = [p.strip() for p in phones.split(",") if p.strip()]
-    elif contact_access == "blocklist":
-        phones = answers.get("blocklist_phones", "")
-        config["blocklist"] = [p.strip() for p in phones.split(",") if p.strip()]
+    # Always-best defaults (no need to ask)
+    config["voice_transcription"] = True
+    config["media_handling"] = "acknowledge"
+    config["group_policy"] = "monitor"
 
-    # Voice
-    voice = answers.get("voice", "transcribe")
-    config["voice_transcription"] = voice == "transcribe"
+    # Business template overrides (applied AFTER purpose defaults, BEFORE advanced overrides)
+    business_type_raw = answers.get("business_type", "")
+    if business_type_raw and business_type_raw not in ("skip", "enter", ""):
+        from src.business_templates import get_template, apply_template
+        template_id = resolve_business_type(business_type_raw)
+        template = get_template(template_id)
+        if template:
+            apply_template(template, config)
 
-    # Media
-    config["media_handling"] = answers.get("media", "acknowledge")
+    # Owner name
+    owner_name = answers.get("owner_name", "skip")
+    if owner_name not in ("skip", "enter", ""):
+        config["owner_name"] = owner_name.strip()
 
-    # Integrations
+    # Integrations (only set manually if no business template set them)
     integ = answers.get("integrations", "none")
-    if integ == "spreadsheet":
-        config["enabled_integrations"] = ["core", "spreadsheet"]
-    elif integ == "email":
-        config["enabled_integrations"] = ["core", "email"]
-    elif integ == "both":
-        config["enabled_integrations"] = ["core", "spreadsheet", "email"]
-    else:
-        config["enabled_integrations"] = ["core"]
+    if not config.get("business_template"):
+        # No template active -- use manual integrations choice
+        if integ == "spreadsheet":
+            config["enabled_integrations"] = ["core", "spreadsheet"]
+        elif integ == "email":
+            config["enabled_integrations"] = ["core", "email"]
+        elif integ == "both":
+            config["enabled_integrations"] = ["core", "spreadsheet", "email"]
+        else:
+            config["enabled_integrations"] = ["core"]
 
     # Admin number (Theorem T_ADMCMD)
     admin = answers.get("admin_number", "skip")
     if admin not in ("skip", "enter", ""):
-        # User entered their phone number via "Other" option
         config["admin_number"] = "".join(c for c in admin if c.isdigit())
+
+    # Advanced overrides: if user chose to customize, these override smart defaults
+    for field in ("personality_mode", "tone", "mode", "privacy_level"):
+        val = answers.get(field)
+        if val and val not in ("skip", "enter", ""):
+            config[field] = val
+
+    # Re-derive alert_on_auto_reply from personality_mode
+    if config["personality_mode"] == "impersonate":
+        config["alert_on_auto_reply"] = False
 
     return config
 
@@ -405,7 +537,12 @@ class WhatsAppOrchestrator:
         self.memory: MemoryStore | None = None
         self.memory_search: MemorySearch | None = None
         self._message_count_since_consolidation = 0
-        self._CONSOLIDATION_THRESHOLD = 10  # Consolidate every N messages
+        self._CONSOLIDATION_THRESHOLD = 30  # Consolidate every N messages
+        self._consolidation_ran_at_startup = False
+        # Per-contact conversation takeover: {jid: expiry_timestamp}
+        self._takeover_contacts: dict[str, float] = {}
+        # Push name cache: skip DB writes when name hasn't changed
+        self._last_push_names: dict[str, str] = {}
         # Quiet hours system
         self.quiet_hours: QuietHours | None = None
         # Security guards
@@ -434,6 +571,9 @@ class WhatsAppOrchestrator:
         self._ESCALATION_ALERT_MAX = 20  # Keep last 20 alerts for context matching
         # Track last bot response per contact for correction detection
         self._last_bot_response: dict[str, str] = {}  # sender_id -> last response
+        # Broadcast campaign engine
+        self.broadcast: BroadcastEngine | None = None
+        self._broadcast_store: CampaignStore | None = None
 
     def print_setup_instructions(self) -> None:
         """Print the setup wizard questions for the user to answer via AskUserQuestion."""
@@ -442,10 +582,19 @@ class WhatsAppOrchestrator:
         print("=" * 60)
         print()
         print("This skill needs to be configured interactively.")
-        print("The following AskUserQuestion calls should be made:")
+        print("Phase 1: Ask 4 core questions:")
         print()
 
         for q in SETUP_QUESTIONS:
+            print(f"  Q: {q['question']}")
+            for opt in q["options"]:
+                print(f"     - {opt['label']}: {opt['description']}")
+            print()
+
+        print("Phase 2: Show smart defaults and ask: Continue or Customize?")
+        print("Phase 3 (optional): If Customize, ask advanced settings:")
+        print()
+        for q in ADVANCED_QUESTIONS:
             print(f"  Q: {q['question']}")
             for opt in q["options"]:
                 print(f"     - {opt['label']}: {opt['description']}")
@@ -532,6 +681,7 @@ class WhatsAppOrchestrator:
         3. Text-extractable media (PDFs, documents) have text injected into the user message
         4. Audio/video audio tracks get transcribed and injected as text
         """
+        import time as _time
         mode = self.config.get("mode", "auto_reply")
 
         # Theorem T_LOGREDACT: Never log message content; use length indicators (P_LOGPII).
@@ -541,6 +691,29 @@ class WhatsAppOrchestrator:
         if self.health_monitor:
             self.health_monitor.record_message(chat_id)
             self.health_monitor.set_whatsapp_connected(True)
+
+        # Daily summary counters
+        self._daily_msg_count += 1
+        self._daily_unique_contacts.add(sender_id)
+
+        # Update contact name from WhatsApp pushName (skip if unchanged since last message)
+        push_name = metadata.get("sender_name", "")
+        if push_name and self.contact_store and self._last_push_names.get(sender_id) != push_name:
+            self._last_push_names[sender_id] = push_name
+            self.contact_store.update_whatsapp_name(sender_id, push_name=push_name)
+            # Enrich metadata with best known name for downstream use
+            metadata["sender_name"] = self.contact_store.get_contact_name(sender_id)
+
+        # Per-contact takeover: skip processing if owner is handling this contact
+        if sender_id in self._takeover_contacts:
+            expiry = self._takeover_contacts[sender_id]
+            if _time.time() < expiry:
+                # Owner has taken over this conversation; don't auto-reply
+                if self.contact_store:
+                    asyncio.create_task(self.contact_store.store_sample(sender_id, "user", content))
+                return
+            else:
+                del self._takeover_contacts[sender_id]
 
         # Theorem T_ADMCMD: Admin slash commands are handled directly, not forwarded to AI.
         admin_number = self.config.get("admin_number", "")
@@ -576,7 +749,8 @@ class WhatsAppOrchestrator:
         if self.scorer:
             score, reasons = self.scorer.score_dm(content, sender_id)
 
-        if self.message_queue:
+        # Only queue messages in ask_before_reply mode (in auto_reply, queue is wasted I/O)
+        if self.message_queue and mode != "auto_reply":
             queue_id = self.message_queue.add(
                 sender_id, metadata.get("sender_name", ""), content, score, reasons,
             )
@@ -659,7 +833,9 @@ class WhatsAppOrchestrator:
                         pass
 
         # SemanticGuard: check for prompt injection before processing
-        if self.semantic_guard and content:
+        # Skip for assistant/business modes -- order messages don't need injection detection
+        _personality = self.config.get("personality_mode", "impersonate")
+        if self.semantic_guard and content and _personality == "impersonate":
             api_key = os.environ.get("AI_GATEWAY_API_KEY", "")
             api_url = self.config.get("ai_gateway_url", "https://ai-gateway.happycapy.ai/api/v1/openai/v1")
             guard_model = self.config.get("profile_model", "gpt-4.1-mini")  # Use fast model
@@ -750,6 +926,13 @@ class WhatsAppOrchestrator:
         if self.contact_store:
             asyncio.create_task(self.contact_store.store_sample(sender_id, "user", enriched_content))
 
+        # Broadcast reply attribution: check if this message is a reply to a campaign
+        if self.broadcast and content:
+            try:
+                await self.broadcast.check_reply_attribution(sender_id, content)
+            except Exception:
+                pass  # Attribution failure should never block message processing
+
         if mode == "monitor_only":
             cleanup_temp_files(*temp_files_to_cleanup)
             return
@@ -830,6 +1013,10 @@ class WhatsAppOrchestrator:
             if esc_context:
                 system_prompt = system_prompt + "\n\n---\n\n" + esc_context
 
+        # Send typing indicator before AI processing (non-blocking, best-effort)
+        if self.channel:
+            asyncio.create_task(self.channel.send_typing(chat_id))
+
         # Generate AI response with multimodal content and optional tool calling.
         # Theorem T_POOL: Pass shared client for connection reuse.
         use_tools = self.config.get("tool_calling_enabled", True) and self.tool_executor is not None
@@ -849,6 +1036,7 @@ class WhatsAppOrchestrator:
         # ── Tool call loop (max 1 iteration) ──
         response = ai_resp.content or ""
         generated_media: list[str] = []  # Paths to files generated by tools
+        tool_result_messages: list[dict] = []
 
         if ai_resp.finish_reason == "tool_calls" and ai_resp.tool_calls and self.tool_executor:
             tool_count = len(ai_resp.tool_calls)
@@ -863,7 +1051,6 @@ class WhatsAppOrchestrator:
                 await self.channel.send_text(chat_id, "Generating video, this may take a minute...")
 
             # Execute each tool call
-            tool_result_messages: list[dict] = []
             for tc in ai_resp.tool_calls:
                 tc_id = tc.get("id", "")
                 func = tc.get("function", {})
@@ -928,7 +1115,8 @@ class WhatsAppOrchestrator:
                     response = "I'm sorry, I can't share that information."
 
             # Fabrication guard: block fabricated personal claims
-            if self.fabrication_guard:
+            # Skip for tool-call responses (AI is confirming data it just logged)
+            if self.fabrication_guard and not tool_result_messages:
                 fab_result = self.fabrication_guard.check(response)
                 if fab_result.is_fabrication:
                     print(f"[fabrication-guard] BLOCKED: {fab_result.category} (conf={fab_result.confidence:.2f})")
@@ -1046,6 +1234,32 @@ class WhatsAppOrchestrator:
 
         return "\n".join(lines)
 
+    async def _startup_consolidation_check(self) -> None:
+        """Check on startup if any contacts need memory consolidation.
+
+        The in-memory consolidation counter resets on restart, so contacts
+        with samples but empty MEMORY.md would never get consolidated.
+        This runs once after startup to catch up.
+        """
+        if not self.memory or not self.contact_store or self._consolidation_ran_at_startup:
+            return
+        self._consolidation_ran_at_startup = True
+        try:
+            active = self.contact_store.get_active_jids(min_samples=self._CONSOLIDATION_THRESHOLD)
+            needs = []
+            for jid, name in active:
+                existing_memory = self.memory.read_contact_memory(jid)
+                if not existing_memory:
+                    needs.append((jid, name))
+            if needs:
+                print(f"[memory] Startup check: {len(needs)} contacts have samples but no memory, consolidating...")
+                await self._consolidate_memory()
+                # Also run reflection on startup if needed
+                if self.reflection and self.contact_store:
+                    await self._run_self_reflection()
+        except Exception as e:
+            print(f"[memory] Startup consolidation check error: {e}")
+
     async def _consolidate_memory(self) -> None:
         """Background task: consolidate per-contact memory (isolated).
 
@@ -1142,7 +1356,10 @@ class WhatsAppOrchestrator:
                 "/unblock <number> - Remove from blocklist\n"
                 "/pause - Quick switch to monitor_only\n"
                 "/resume - Quick switch to auto_reply\n"
-                "/contacts - List known contacts\n"
+                "/contacts - List known contacts (with WhatsApp names)\n"
+                "/findcontact <name> - Search contacts by name\n"
+                "/addcontact <number> <name> - Save a contact name\n"
+                "/removecontact <number> - Remove a contact\n"
                 "/busy - Set status to busy (auto-reply with template)\n"
                 "/dnd - Set status to DND\n"
                 "/available - Clear status override\n"
@@ -1174,6 +1391,15 @@ class WhatsAppOrchestrator:
                 "/memory consolidate - Force memory consolidation\n"
                 "/memorysearch <query> - Search memory history\n"
                 "/kg - Knowledge graph stats (or /kg search|extract)\n"
+                "/takeover <number> [minutes] - Pause bot for a contact (default 30m)\n"
+                "/takeover list|clear - View/clear active takeovers\n"
+                "/template - View/switch business templates\n"
+                "/broadcast <message> - Quick broadcast to all contacts\n"
+                "/broadcast <segment> <message> - Broadcast to a segment\n"
+                "/campaign - List campaigns (or /campaign <id> for details)\n"
+                "/campaign start|pause|cancel <id> - Control a campaign\n"
+                "/segment - List available segments\n"
+                "/segment preview <id> - Preview contacts in a segment\n"
                 "/tools - Tool calling status (or /tools on|off)\n"
                 "/reflect - Reflection engine stats (lessons learned)\n"
                 "/help - This message"
@@ -1290,22 +1516,91 @@ class WhatsAppOrchestrator:
 
         elif cmd == "/contacts":
             if self.contact_store:
+                # Show WhatsApp contacts with names (from sync) + profiled contacts
+                wa_count = self.contact_store.get_whatsapp_contact_count()
                 profiles = self.contact_store.get_all_profiles()
+                wa_contacts = self.contact_store.get_all_whatsapp_contacts()
+
+                lines = [f"*Contacts* ({wa_count} synced, {len(profiles)} profiled)\n"]
+
+                # Show profiled contacts with best names
                 if profiles:
-                    lines = [f"*Known Contacts ({len(profiles)})*\n"]
-                    for p in profiles[:20]:  # Cap at 20 to avoid message overflow
-                        name = p.display_name or p.jid
+                    lines.append("*Profiled:*")
+                    for p in profiles[:20]:
+                        name = self.contact_store.get_contact_name(p.jid)
                         rel = p.relationship if p.relationship != "unknown" else ""
                         lang = p.language if p.language != "en" else ""
                         details = " | ".join(filter(None, [rel, lang, p.tone]))
-                        lines.append(f"- {name}: {details}" if details else f"- {name}")
+                        lines.append(f"- {name} ({p.jid}): {details}" if details else f"- {name} ({p.jid})")
                     if len(profiles) > 20:
                         lines.append(f"... and {len(profiles) - 20} more")
-                    await self.channel.send_text(chat_id, "\n".join(lines))
-                else:
-                    await self.channel.send_text(chat_id, "No contact profiles yet.")
+
+                # Show recent WhatsApp contacts without profiles
+                profiled_jids = {p.jid for p in profiles}
+                unprofiled = [c for c in wa_contacts if c["jid"] not in profiled_jids]
+                if unprofiled:
+                    lines.append(f"\n*WhatsApp contacts (no profile yet):*")
+                    for c in unprofiled[:15]:
+                        name = c.get("saved_name") or c.get("push_name") or c.get("verified_name", "")
+                        source = "saved" if c.get("saved_name") else ("push" if c.get("push_name") else "biz")
+                        lines.append(f"- {name} [{source}] ({c['jid']})")
+                    if len(unprofiled) > 15:
+                        lines.append(f"... and {len(unprofiled) - 15} more")
+
+                if not profiles and not wa_contacts:
+                    lines.append("No contacts yet. Names sync automatically from WhatsApp.")
+
+                await self.channel.send_text(chat_id, "\n".join(lines))
             else:
                 await self.channel.send_text(chat_id, "Contact store not initialized.")
+
+        elif cmd == "/findcontact":
+            if not self.contact_store:
+                await self.channel.send_text(chat_id, "Contact store not initialized.")
+            elif not args:
+                await self.channel.send_text(chat_id, "Usage: /findcontact <name>")
+            else:
+                results = self.contact_store.resolve_contact_by_name(args, limit=10)
+                if results:
+                    lines = [f"*Contacts matching '{args}':*\n"]
+                    for r in results:
+                        source_tag = f"[{r['name_source']}]"
+                        push = f" (push: {r['push_name']})" if r.get("push_name") and r["push_name"] != r["name"] else ""
+                        lines.append(f"- {r['name']} {source_tag} {r['jid']}{push}")
+                    await self.channel.send_text(chat_id, "\n".join(lines))
+                else:
+                    await self.channel.send_text(chat_id, f"No contacts found matching '{args}'.")
+
+        elif cmd == "/addcontact":
+            if not args or " " not in args:
+                await self.channel.send_text(chat_id, "Usage: /addcontact <number> <full name>")
+            else:
+                num_part, name_part = args.split(" ", 1)
+                num = "".join(c for c in num_part if c.isdigit())
+                if not num or len(num) < 7:
+                    await self.channel.send_text(chat_id, "Invalid phone number.")
+                else:
+                    jid = f"{num}@s.whatsapp.net"
+                    # Save to WhatsApp via bridge
+                    await self.channel.add_contact(jid, name_part.strip())
+                    # Also save locally in our contact directory
+                    if self.contact_store:
+                        self.contact_store.update_whatsapp_name(num, saved_name=name_part.strip())
+                    await self.channel.send_text(chat_id, f"Contact saved: {name_part.strip()} ({num})")
+                    print(f"[admin] Added contact: {num} -> {name_part.strip()}")
+
+        elif cmd == "/removecontact":
+            if not args:
+                await self.channel.send_text(chat_id, "Usage: /removecontact <number>")
+            else:
+                num = "".join(c for c in args if c.isdigit())
+                if not num:
+                    await self.channel.send_text(chat_id, "Invalid phone number.")
+                else:
+                    jid = f"{num}@s.whatsapp.net"
+                    await self.channel.remove_contact(jid)
+                    await self.channel.send_text(chat_id, f"Contact removal requested for {num}.")
+                    print(f"[admin] Removed contact: {num}")
 
         # ── Intelligence layer admin commands ──
 
@@ -1434,8 +1729,20 @@ class WhatsAppOrchestrator:
                 profile = self.contact_store.get_profile(num)
                 if profile:
                     samples = self.contact_store.get_sample_count(num)
-                    lines = [f"*Contact Card: {profile.display_name or num}*\n"]
+                    best_name = self.contact_store.get_contact_name(num)
+                    lines = [f"*Contact Card: {best_name}*\n"]
                     lines.append(f"JID: {profile.jid}")
+                    # Show all known names
+                    wa_names = self.contact_store._name_cache.get(num)
+                    if wa_names:
+                        if wa_names[1]:
+                            lines.append(f"Saved name: {wa_names[1]}")
+                        if wa_names[0]:
+                            lines.append(f"Push name: {wa_names[0]}")
+                        if wa_names[2]:
+                            lines.append(f"Business: {wa_names[2]}")
+                    if profile.display_name:
+                        lines.append(f"AI-inferred name: {profile.display_name}")
                     lines.append(f"Relationship: {profile.relationship}")
                     lines.append(f"Tone: {profile.tone} (formality: {profile.formality:.1f})")
                     lines.append(f"Emoji: {profile.emoji_usage}")
@@ -2017,6 +2324,207 @@ class WhatsAppOrchestrator:
                 text += "\n\nForce self-reflection: /reflect run"
                 await self.channel.send_text(chat_id, text)
 
+        elif cmd == "/takeover":
+            # /takeover <number> [minutes] - temporarily disable bot for a contact
+            # /takeover list - show active takeovers
+            # /takeover clear - clear all takeovers
+            import time as _time
+            if args.strip() == "list":
+                if not self._takeover_contacts:
+                    await self.channel.send_text(chat_id, "No active takeovers.")
+                else:
+                    lines = ["*Active Takeovers*\n"]
+                    for jid, exp in self._takeover_contacts.items():
+                        remaining = int(exp - _time.time())
+                        if remaining > 0:
+                            name = self.contact_store.get_contact_name(jid) if self.contact_store else jid
+                            lines.append(f"- {name} ({jid}): {remaining // 60}m {remaining % 60}s left")
+                    await self.channel.send_text(chat_id, "\n".join(lines))
+            elif args.strip() == "clear":
+                count = len(self._takeover_contacts)
+                self._takeover_contacts.clear()
+                await self.channel.send_text(chat_id, f"Cleared {count} takeover(s).")
+            elif args:
+                takeover_parts = args.split()
+                number = "".join(c for c in takeover_parts[0] if c.isdigit())
+                minutes = 30  # default 30 minutes
+                if len(takeover_parts) > 1:
+                    try:
+                        minutes = int(takeover_parts[1])
+                    except ValueError:
+                        pass
+                if number:
+                    jid = f"{number}@s.whatsapp.net"
+                    self._takeover_contacts[jid] = _time.time() + (minutes * 60)
+                    name = self.contact_store.get_contact_name(jid) if self.contact_store else number
+                    await self.channel.send_text(chat_id, f"Took over {name} for {minutes} minutes. Bot will not reply to them.")
+                    print(f"[admin] Takeover: {name} ({jid}) for {minutes}m")
+                else:
+                    await self.channel.send_text(chat_id, "Usage: /takeover <number> [minutes]\n/takeover list\n/takeover clear")
+            else:
+                await self.channel.send_text(chat_id, "Usage: /takeover <number> [minutes]\n/takeover list\n/takeover clear")
+
+        elif cmd == "/template":
+            from src.business_templates import get_template, get_all_template_names, get_soul_md, apply_template
+            current = self.config.get("business_template", "")
+            if not args.strip():
+                # Show current template and list available ones
+                tmpl_list = get_all_template_names()
+                lines = ["*Business Templates*\n"]
+                if current:
+                    ct = get_template(current)
+                    lines.append(f"Current: {ct['name'] if ct else current}\n")
+                else:
+                    lines.append("Current: None (generic)\n")
+                lines.append("Available templates:")
+                for t in tmpl_list:
+                    marker = " (active)" if t["id"] == current else ""
+                    lines.append(f"  - {t['id']}: {t['name']} -- {t['description']}{marker}")
+                lines.append("\nUsage: /template <id> to switch")
+                await self.channel.send_text(chat_id, "\n".join(lines))
+            else:
+                new_id = resolve_business_type(args.strip())
+                new_tmpl = get_template(new_id)
+                if not new_tmpl:
+                    await self.channel.send_text(chat_id, f"Unknown template: {args.strip()}\nUse /template to see available options.")
+                else:
+                    # Apply template: update config + rewrite SOUL.md
+                    apply_template(new_tmpl, self.config)
+                    save_config(self.config)
+                    # Rewrite SOUL.md with template content
+                    soul_content = get_soul_md(new_id)
+                    if soul_content:
+                        self.context_builder.update_identity_file("SOUL.md", soul_content)
+                    await self.channel.send_text(
+                        chat_id,
+                        f"Switched to *{new_tmpl['name']}* template.\n"
+                        f"Tone: {new_tmpl['config_overrides'].get('tone', 'unchanged')}\n"
+                        f"SOUL.md updated with {new_tmpl['name']} personality.\n"
+                        f"Integrations: {', '.join(new_tmpl['config_overrides'].get('enabled_integrations', ['core']))}"
+                    )
+
+        elif cmd == "/broadcast":
+            if not self.broadcast:
+                await self.channel.send_text(chat_id, "Broadcast engine not initialized.")
+                return
+            if not args:
+                await self.channel.send_text(chat_id,
+                    "Usage:\n"
+                    "/broadcast <message> - Send to all contacts\n"
+                    "/broadcast <segment> <message> - Send to a segment\n\n"
+                    "Segments: all_contacts, active, recent, dormant, new_contacts, repeat_contacts, high_engagement"
+                )
+                return
+            # Parse: /broadcast <segment_id> <message> OR /broadcast <message>
+            first_word = args.split(maxsplit=1)[0].lower()
+            segment_id = "all_contacts"
+            message_text = args
+            all_seg_ids = set(AUTO_SEGMENTS.keys())
+            # Check custom segments too
+            if self._broadcast_store:
+                for seg in self._broadcast_store.list_segments():
+                    all_seg_ids.add(seg.id)
+            if first_word in all_seg_ids:
+                segment_id = first_word
+                message_text = args.split(maxsplit=1)[1] if len(args.split(maxsplit=1)) > 1 else ""
+            if not message_text:
+                await self.channel.send_text(chat_id, "Please provide a message to broadcast.")
+                return
+            try:
+                from datetime import datetime as _dt_now
+                campaign = await self.broadcast.create_campaign(
+                    name=f"Quick broadcast ({_dt_now.now().strftime('%m/%d %H:%M')})",
+                    message_template=message_text,
+                    segment_id=segment_id,
+                    personalize=True,
+                    created_by=chat_id.split("@")[0],
+                )
+                result = await self.broadcast.start_campaign(campaign.id)
+                await self.channel.send_text(chat_id,
+                    f"Broadcast {campaign.id} created!\n"
+                    f"Segment: {campaign.segment_name}\n"
+                    f"Recipients: {campaign.total_recipients}\n"
+                    f"{result}"
+                )
+            except ValueError as e:
+                await self.channel.send_text(chat_id, f"Broadcast error: {e}")
+            except Exception as e:
+                await self.channel.send_text(chat_id, f"Broadcast failed: {type(e).__name__}: {e}")
+
+        elif cmd == "/campaign":
+            if not self.broadcast:
+                await self.channel.send_text(chat_id, "Broadcast engine not initialized.")
+                return
+            if not args:
+                # List recent campaigns
+                campaigns = self.broadcast.store.list_campaigns(limit=10)
+                if not campaigns:
+                    await self.channel.send_text(chat_id, "No campaigns yet. Use /broadcast to create one.")
+                    return
+                lines = ["*Recent Campaigns*\n"]
+                for c in campaigns:
+                    emoji = {"draft": "📝", "sending": "📤", "completed": "✅", "paused": "⏸", "cancelled": "❌", "scheduled": "⏰"}.get(c.status, "❓")
+                    lines.append(f"{emoji} [{c.id}] {c.name}")
+                    lines.append(f"   {c.status} | {c.sent_count}/{c.total_recipients} sent | {c.replied_count} replies")
+                lines.append(f"\nUse /campaign <id> for details")
+                await self.channel.send_text(chat_id, "\n".join(lines))
+                return
+            # Sub-commands: start, pause, cancel, delete, or show detail
+            sub_parts = args.split(maxsplit=1)
+            sub_cmd = sub_parts[0].lower()
+            sub_args = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+            if sub_cmd == "start" and sub_args:
+                result = await self.broadcast.start_campaign(sub_args)
+                await self.channel.send_text(chat_id, result)
+            elif sub_cmd == "pause" and sub_args:
+                result = await self.broadcast.pause_campaign(sub_args)
+                await self.channel.send_text(chat_id, result)
+            elif sub_cmd == "cancel" and sub_args:
+                result = await self.broadcast.cancel_campaign(sub_args)
+                await self.channel.send_text(chat_id, result)
+            elif sub_cmd == "delete" and sub_args:
+                ok = await self.broadcast.store.delete_campaign(sub_args)
+                await self.channel.send_text(chat_id,
+                    f"Campaign {sub_args} deleted." if ok else f"Campaign {sub_args} not found."
+                )
+            else:
+                # Treat as campaign_id for detail view
+                campaign_id = args.strip()
+                report = self.broadcast.get_campaign_report(campaign_id)
+                await self.channel.send_text(chat_id, report)
+
+        elif cmd == "/segment":
+            if not self.broadcast:
+                await self.channel.send_text(chat_id, "Broadcast engine not initialized.")
+                return
+            if not args:
+                # List all segments
+                segments = self.broadcast.store.list_segments()
+                lines = ["*Available Segments*\n"]
+                for seg in segments:
+                    contacts = self.broadcast.segmentation.resolve_segment(seg)
+                    tag = "auto" if seg.segment_type == "auto" else "custom"
+                    lines.append(f"  [{seg.id}] {seg.name} ({len(contacts)} contacts) [{tag}]")
+                    if seg.description:
+                        lines.append(f"    {seg.description}")
+                lines.append(f"\nUse /segment preview <id> to see contacts")
+                await self.channel.send_text(chat_id, "\n".join(lines))
+                return
+            sub_parts = args.split(maxsplit=1)
+            sub_cmd = sub_parts[0].lower()
+            sub_args = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+            if sub_cmd == "preview" and sub_args:
+                segment = self.broadcast.store.get_segment(sub_args)
+                if not segment:
+                    await self.channel.send_text(chat_id, f"Segment '{sub_args}' not found.")
+                    return
+                preview = self.broadcast.segmentation.get_segment_preview(segment, max_show=15)
+                await self.channel.send_text(chat_id, preview)
+            else:
+                await self.channel.send_text(chat_id,
+                    "Usage:\n/segment - List all segments\n/segment preview <id> - Preview contacts"
+                )
+
         elif cmd == "/tools":
             enabled = self.config.get("tool_calling_enabled", True)
             status = "enabled" if enabled else "disabled"
@@ -2040,6 +2548,23 @@ class WhatsAppOrchestrator:
 
         else:
             await self.channel.send_text(chat_id, f"Unknown command: {cmd}\nType /help for available commands.")
+
+    async def _handle_contacts_sync(self, contacts: list[dict]) -> None:
+        """Handle contact sync events from the Baileys bridge.
+
+        Receives contact data (pushName, saved name, verified name) from:
+        - Initial history sync (messaging-history.set contacts array)
+        - Incremental updates (contacts.update events on incoming messages)
+        - Full contact upserts (contacts.upsert events)
+        """
+        if not self.contact_store:
+            return
+        try:
+            count = await self.contact_store.sync_contacts(contacts)
+            if count > 0:
+                print(f"[contacts-sync] Synced {count} contact names")
+        except Exception as e:
+            print(f"[contacts-sync] Error: {e}")
 
     async def _handle_history_sync(
         self, messages: list[dict], sync_type: int, progress: float | None, is_latest: bool
@@ -2173,13 +2698,17 @@ class WhatsAppOrchestrator:
         self.quiet_hours = QuietHours()
         self.quiet_hours.update_config(self.config)
         self.semantic_guard = SemanticGuard()
-        self.fabrication_guard = FabricationGuard()
+        # FabricationGuard only for impersonate mode (catches "I'm at the gym" etc.)
+        # In assistant/business mode, the AI never pretends to be the owner.
+        if self.config.get("personality_mode") == "impersonate":
+            self.fabrication_guard = FabricationGuard()
         self.content_filter = ContentFilter()
         self.health_monitor = HealthMonitor()
         # Context builder: layered system prompt assembly with identity files
         self.context_builder = ContextBuilder(
             get_config_dir(),
             personality_mode=self.config.get("personality_mode", "impersonate"),
+            config=self.config,
         )
         # Heartbeat service: periodic maintenance every 30 minutes
         self.heartbeat = HeartbeatService(interval_s=30 * 60)
@@ -2203,6 +2732,54 @@ class WhatsAppOrchestrator:
                         await kg.extract_from_samples(jid, samples, api_url, api_key)
             return _task
         self.heartbeat.register_task("kg_extraction", _make_kg_extraction_task(self.kg, self.contact_store, self.config))
+
+        # Daily summary: send activity summary to admin once per day
+        self._last_daily_summary_date: str = ""
+        self._daily_msg_count = 0
+        self._daily_unique_contacts: set[str] = set()
+
+        def _make_daily_summary_task(bot_ref):
+            import datetime
+            async def _task():
+                today = datetime.date.today().isoformat()
+                if bot_ref._last_daily_summary_date == today:
+                    return  # Already sent today
+                # Only send between 8-10 AM check (heartbeat runs every 30min)
+                now = datetime.datetime.now()
+                if now.hour < 8 or now.hour >= 10:
+                    return
+                admin_number = bot_ref.config.get("admin_number", "")
+                if not admin_number or not bot_ref.channel:
+                    return
+                admin_jid = f"{admin_number}@s.whatsapp.net"
+                # Gather stats
+                msg_count = bot_ref._daily_msg_count
+                unique_contacts = len(bot_ref._daily_unique_contacts)
+                profiles_count = len(bot_ref.contact_store.get_all_profiles()) if bot_ref.contact_store else 0
+                health = bot_ref.health_monitor.get_health() if bot_ref.health_monitor else {}
+                uptime_h = int(health.get("uptime_seconds", 0)) // 3600
+                pending_esc = bot_ref.escalation.pending_count() if bot_ref.escalation else 0
+                summary = (
+                    f"*Daily Summary*\n\n"
+                    f"Messages yesterday: {msg_count}\n"
+                    f"Unique contacts: {unique_contacts}\n"
+                    f"Total profiles: {profiles_count}\n"
+                    f"Pending escalations: {pending_esc}\n"
+                    f"Uptime: {uptime_h}h\n"
+                    f"Mode: {bot_ref.config.get('mode', '?')}"
+                )
+                try:
+                    await bot_ref.channel.send_text(admin_jid, summary)
+                    print(f"[daily-summary] Sent to admin")
+                except Exception as e:
+                    print(f"[daily-summary] Error: {e}")
+                # Reset counters for new day
+                bot_ref._last_daily_summary_date = today
+                bot_ref._daily_msg_count = 0
+                bot_ref._daily_unique_contacts = set()
+            return _task
+        self.heartbeat.register_task("daily_summary", _make_daily_summary_task(self))
+
         # Session manager (conversation continuity)
         self.session_mgr = SessionManager(db_path)
         # Cron/scheduling service
@@ -2239,6 +2816,31 @@ class WhatsAppOrchestrator:
                 self.tool_executor._channel = self.channel
                 self.tool_executor._escalation = self.escalation
 
+        # Broadcast campaign engine (needs contact_store, channel, memory, KG, http_client)
+        try:
+            self.broadcast, self._broadcast_store = create_broadcast_engine(
+                config=self.config,
+                contact_store=self.contact_store,
+                channel=None,  # Set after channel is created
+                memory_store=self.memory,
+                knowledge_graph=self.kg,
+                http_client=self._http_client,
+            )
+            # Register broadcast tools with tool executor
+            if self.tool_executor and self.broadcast:
+                bcast_integration = BroadcastIntegration(self.broadcast)
+                for td in bcast_integration.tool_definitions():
+                    tool_name = td["function"]["name"]
+                    self.tool_executor._handlers[tool_name] = bcast_integration
+                    self.tool_executor._integration_tools.add(tool_name)
+                self.tool_executor._integrations["broadcast"] = bcast_integration
+            # Register heartbeat task for scheduled campaign checks
+            if self.heartbeat and self.broadcast:
+                self.heartbeat.register_task("broadcast_scheduler", self.broadcast.check_scheduled_campaigns)
+            print(f"Broadcast engine initialized")
+        except Exception as e:
+            print(f"Broadcast engine init error: {type(e).__name__}: {e}")
+
         # Mark bridge running in health monitor
         if self.health_monitor:
             self.health_monitor.set_bridge_running(True)
@@ -2265,7 +2867,12 @@ class WhatsAppOrchestrator:
             on_message=self.handle_message,
             on_group_message=self.handle_group_message,
             on_history_sync=self._handle_history_sync,
+            on_contacts_sync=self._handle_contacts_sync,
         )
+
+        # Share channel with broadcast engine (created before channel exists)
+        if self.broadcast:
+            self.broadcast._channel = self.channel
 
         # Start heartbeat service (periodic maintenance)
         if self.heartbeat:
@@ -2274,6 +2881,10 @@ class WhatsAppOrchestrator:
         # Start cron/scheduling service
         if self.cron:
             await self.cron.start()
+
+        # Startup consolidation: catch up on contacts that have samples but no memory
+        # (fixes the issue where in-memory counter resets on restart, skipping consolidation)
+        asyncio.create_task(self._startup_consolidation_check())
 
         # Handle shutdown
         loop = asyncio.get_event_loop()

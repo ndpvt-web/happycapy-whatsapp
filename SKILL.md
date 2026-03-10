@@ -64,6 +64,22 @@ Analyze the user's response to extract as many config values as possible. Use AL
 | "ask me first", "approve", "confirm before" | mode: "ask_before_reply" |
 | "auto reply", "automatic", "just reply" | mode: "auto_reply" |
 
+**Business type signals (infer business_template -- only when purpose is business_support):**
+
+| Signal in user's response | Config inference |
+|---|---|
+| "restaurant", "cafe", "bakery", "food", "kitchen", "catering", "delivery" | business_template: "food_restaurant" |
+| "salon", "spa", "barber", "beauty", "nail", "hair", "massage" | business_template: "beauty_wellness" |
+| "shop", "store", "retail", "clothing", "electronics", "grocery", "pharmacy" | business_template: "retail_shop" |
+| "lawyer", "accountant", "consultant", "agency", "freelance", "architect" | business_template: "professional_services" |
+| "doctor", "clinic", "dentist", "hospital", "medical", "vet", "physio" | business_template: "healthcare" |
+| "real estate", "property", "rental", "broker", "housing" | business_template: "real_estate" |
+| "hotel", "travel", "tour", "airbnb", "hostel", "guesthouse" | business_template: "travel_hospitality" |
+| "school", "tutor", "coaching", "training", "course", "academy" | business_template: "education" |
+| "plumber", "electrician", "cleaning", "repair", "handyman", "maintenance" | business_template: "home_services" |
+
+When a business type is inferred from free text, skip the business type question. Apply the template using `resolve_business_type()` and `apply_template()` from `src.business_templates`.
+
 **Integration signals (infer enabled_integrations):**
 
 | Signal in user's response | Config inference |
@@ -179,7 +195,25 @@ Ask ONE AskUserQuestion with 3 questions: Admin, Tone, Contacts.
 **Example flow: User selected "Business automation -- orders, invoices, tracking"**
 
 Inferred from preset: purpose=business_support, mode=auto_reply, personality_mode=assistant, tone=professional, privacy_level=strict, fabrication_policy=deflect, enabled_integrations=["core","spreadsheet","email"].
-Missing REQUIRED: admin_number. Missing IMPORTANT: contacts.
+
+**IMPORTANT: Business Template Selection** -- When purpose is "business_support" (user selected "Business automation"), ask ONE additional question to select a business type template:
+
+```
+Business Type (header: "Business Type"):
+  "What type of business do you run? This auto-configures tone, vocabulary, workflows, and response patterns."
+  Options:
+  - "Food & Restaurant" -- food_restaurant (Menu sharing, order-taking, delivery time estimates)
+  - "Beauty & Wellness" -- beauty_wellness (Appointment booking, service menu, availability)
+  - "Retail & Shop" -- retail_shop (Product catalog, stock checks, order processing)
+  - "Professional Services" -- professional_services (Client intake, scheduling, quotes)
+  multiSelect: false
+```
+
+User can also type via "Other" for: healthcare, real_estate, travel_hospitality, education, home_services, custom_other.
+
+The selected template auto-configures: tone, SOUL.md personality, spreadsheet column presets, integrations, and industry-specific workflows. Templates are just starting points -- everything remains editable via /commands and SOUL.md.
+
+After template selection: Missing REQUIRED: admin_number. Missing IMPORTANT: contacts.
 Ask ONE AskUserQuestion with 2 questions: Admin, Contacts.
 
 **Example flow: User typed "monitor my business WhatsApp +852 92893658"**
@@ -191,35 +225,71 @@ Missing: nothing relevant (monitor mode doesn't need tone/personality/integratio
 **Example flow: User typed "I want a WhatsApp bot for my bakery, take orders and email receipts"**
 
 Inferred: purpose=business_support, mode=auto_reply, tone=professional, personality_mode=assistant, enabled_integrations=["core","spreadsheet","email"].
+Also inferred from "bakery": business_template=food_restaurant (auto-configures bakery-appropriate SOUL.md with order-taking workflows, warm tone, food-specific language).
 Missing REQUIRED: admin_number. Missing IMPORTANT: contacts.
-Ask ONE AskUserQuestion with 2 questions: Admin, Contacts.
+Ask ONE AskUserQuestion with 2 questions: Admin, Contacts. (Skip business type question since it was inferred from "bakery".)
 
 If "Specific contacts" is selected for contacts, do ONE more follow-up asking for comma-separated phone numbers.
 
-#### Phase 4: Apply smart defaults for all unresolved OPTIONAL fields
+#### Phase 4: Show defaults and offer customization
 
-After all REQUIRED and IMPORTANT fields are resolved, apply defaults:
+After resolving REQUIRED and IMPORTANT fields, apply smart defaults for everything else. Then **show the user what they're getting** and let them choose to continue or customize.
+
+**Smart defaults (applied automatically):**
 
 | Field | Default | Rationale |
 |---|---|---|
-| personality_mode | "impersonate" | Most natural for personal use |
+| personality_mode | "impersonate" (personal), "assistant" (business/team) | Most natural per use case |
+| tone | "casual_friendly" (personal/team), "professional" (business) | Matches the purpose |
+| mode | "auto_reply" (personal/business/team), "monitor_only" (monitor) | Expected behavior |
 | privacy_level | "strict" | Safest -- never shares cross-contact info |
 | fabrication_policy | "strict" if impersonate, "deflect" if assistant | Impersonate must never make things up |
 | voice_transcription | true | Users generally want this |
-| voice_transcription_provider | "groq" | Fast and free |
 | media_handling | "acknowledge" | Safe, non-committal |
 | group_policy | "monitor" | Never auto-reply in groups |
-| enabled_integrations | ["core"] | No extra features unless asked |
 | owner_name | "" | Bot works without it |
-| alert_on_auto_reply | false if impersonate, true if assistant | Impersonate handles it; assistant should notify |
-| quiet_hours_enabled | false | Can enable later |
-| tool_calling_enabled | true | Image/video/PDF generation |
-| escalation_enabled | true | Smart alerts for important messages |
-| importance_threshold | 7 | Balanced sensitivity |
-| bridge_port | 3002 | Standard port |
-| qr_server_port | 8765 | Standard port |
 
-**Tone special case:** If mode is "monitor_only", tone defaults to "casual_friendly" silently (won't be used). Do NOT ask about tone for monitor-only mode.
+**Show the user their settings summary and ask:**
+
+Use AskUserQuestion with:
+- header: "Review Settings"
+- question: "Here are your settings based on what you told me:\n\n[SHOW FULL SETTINGS SUMMARY - purpose, personality, tone, mode, privacy, voice, groups, integrations]\n\nWould you like to continue with these settings or customize them?"
+- options:
+  - "Continue -- looks good" (Recommended) - Start the bot with these settings
+  - "Customize advanced settings" - Change personality, tone, mode, or privacy level
+- multiSelect: false
+
+**If user selects "Continue":** Proceed to Phase 5 (save config).
+
+**If user selects "Customize":** Use ONE more AskUserQuestion call with up to 4 questions:
+
+```
+Personality (header: "Personality"):
+  "How should the bot behave?"
+  - "Act as me (Recommended)" -- impersonate
+  - "AI Assistant" -- assistant
+
+Tone (header: "Tone"):
+  "What tone should the bot use?"
+  - "Casual & Friendly" -- casual_friendly
+  - "Professional" -- professional
+  - "Concise & Direct" -- concise_direct
+  - "Warm & Empathetic" -- warm_empathetic
+
+Reply Mode (header: "Reply Mode"):
+  "How should incoming messages be handled?"
+  - "Auto-Reply" -- auto_reply
+  - "Ask Before Replying" -- ask_before_reply
+  - "Monitor Only" -- monitor_only
+
+Privacy (header: "Privacy"):
+  "How should private info between contacts be handled?"
+  - "Strict (Recommended)" -- strict
+  - "Moderate" -- moderate
+  - "Open" -- open
+```
+
+Apply their choices as overrides on top of the smart defaults.
 
 #### Phase 5: Save config
 
@@ -237,6 +307,7 @@ config = {
     "admin_number": "<inferred or asked>",
     "personality_mode": "<inferred or defaulted>",
     "owner_name": "<inferred or empty>",
+    "business_template": "",  # or template ID like "food_restaurant", "beauty_wellness", etc.
     # Contact filtering
     "allowlist": [],  # or specific numbers
     "blocklist": [],

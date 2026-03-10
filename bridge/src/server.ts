@@ -5,7 +5,7 @@
 
 import { WebSocketServer, WebSocket } from 'ws';
 import { timingSafeEqual } from 'crypto';
-import { WhatsAppClient, InboundMessage, HistorySyncEvent } from './whatsapp.js';
+import { WhatsAppClient, InboundMessage, HistorySyncEvent, ContactInfo } from './whatsapp.js';
 
 interface SendCommand {
   type: 'send';
@@ -72,6 +72,12 @@ export class BridgeServer {
           messages: event.messages,
           progress: event.progress,
           isLatest: event.isLatest,
+        });
+      },
+      onContactsSync: (contacts: ContactInfo[]) => {
+        this.broadcast({
+          type: 'contacts_sync',
+          contacts,
         });
       },
     });
@@ -170,6 +176,21 @@ export class BridgeServer {
       const { chatJid, count } = cmd;
       await this.wa.fetchMessageHistory(chatJid, count || 50);
       return { fetching: true, chatJid };
+    } else if (cmd.type === 'check_whatsapp' && this.wa) {
+      const results = await this.wa.checkOnWhatsApp(cmd.phoneNumbers || []);
+      return { results };
+    } else if (cmd.type === 'add_contact' && this.wa) {
+      await this.wa.addContact(cmd.jid, cmd.fullName, cmd.firstName);
+      return { added: true, jid: cmd.jid, fullName: cmd.fullName };
+    } else if (cmd.type === 'remove_contact' && this.wa) {
+      await this.wa.removeContact(cmd.jid);
+      return { removed: true, jid: cmd.jid };
+    } else if (cmd.type === 'get_profile_picture' && this.wa) {
+      const url = await this.wa.getProfilePicture(cmd.jid);
+      return { jid: cmd.jid, profilePictureUrl: url };
+    } else if (cmd.type === 'presence' && this.wa) {
+      await this.wa.sendPresenceUpdate(cmd.jid, cmd.presenceType || 'composing');
+      return { presence: true };
     }
     return {};
   }

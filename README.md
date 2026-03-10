@@ -11,20 +11,21 @@
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.11+-blue?logo=python&logoColor=white" alt="Python 3.11+" />
   <img src="https://img.shields.io/badge/node.js-20+-green?logo=node.js&logoColor=white" alt="Node.js 20+" />
-  <img src="https://img.shields.io/badge/lines_of_code-11%2C072-blueviolet" alt="Lines of Code" />
-  <img src="https://img.shields.io/badge/modules-32-orange" alt="32 Modules" />
+  <img src="https://img.shields.io/badge/lines_of_code-15%2C349-blueviolet" alt="Lines of Code" />
+  <img src="https://img.shields.io/badge/modules-48-orange" alt="48 Modules" />
   <img src="https://img.shields.io/badge/security_layers-7-red" alt="7 Security Layers" />
   <img src="https://img.shields.io/badge/license-proprietary-lightgrey" alt="License" />
 </p>
 
 <p align="center">
-  <a href="#-what-it-does">What It Does</a> &ensp;|&ensp;
-  <a href="#-key-features">Key Features</a> &ensp;|&ensp;
-  <a href="#-how-it-works">How It Works</a> &ensp;|&ensp;
-  <a href="#-getting-started">Getting Started</a> &ensp;|&ensp;
-  <a href="#-admin-commands">Admin Commands</a> &ensp;|&ensp;
-  <a href="#-security">Security</a> &ensp;|&ensp;
-  <a href="#-configuration">Configuration</a>
+  <a href="#what-it-does">What It Does</a> &ensp;|&ensp;
+  <a href="#key-features">Key Features</a> &ensp;|&ensp;
+  <a href="#how-it-works">How It Works</a> &ensp;|&ensp;
+  <a href="#getting-started">Getting Started</a> &ensp;|&ensp;
+  <a href="#monitoring-dashboard">Dashboard</a> &ensp;|&ensp;
+  <a href="#admin-commands">Admin Commands</a> &ensp;|&ensp;
+  <a href="#security">Security</a> &ensp;|&ensp;
+  <a href="#configuration">Configuration</a>
 </p>
 
 ---
@@ -70,9 +71,9 @@ HappyCapy WhatsApp connects to your personal or business WhatsApp account and ac
 <p>Acts AS you, not as a bot. Matches your texting style per contact. Denies being AI even when asked directly. Contacts genuinely think it's you typing.</p>
 </td>
 <td align="center" width="33%">
-<img src="assets/feature-ai-brain.png" alt="AI Intelligence" width="180" /><br/>
-<h3>AI Intelligence Layer</h3>
-<p>15+ specialized modules: message scoring, smart escalation, knowledge graph, session tracking, quiet hours, scheduling, and health monitoring.</p>
+<img src="assets/feature-ai-brain.png" alt="Monitoring Dashboard" width="180" /><br/>
+<h3>Monitoring Dashboard</h3>
+<p>Real-time web dashboard with 8 pages: system overview, contacts, messages, spreadsheets, knowledge graph, memory files, identity editor, configuration, and live logs.</p>
 </td>
 <td align="center" width="33%">
 <img src="assets/feature-memory.png" alt="Memory Isolation" width="180" /><br/>
@@ -124,6 +125,7 @@ The bot runs as a background daemon connecting your WhatsApp account to an AI pr
 8. **Media Processor** -- Understands images, PDFs, voice messages, and videos
 9. **Tool Executor** -- Generates images, videos, PDFs, sends messages, searches the web
 10. **Security Guards** -- Multiple layers preventing credential leaks, fabricated responses, and prompt injection
+11. **Monitoring Dashboard** -- React web UI with FastAPI backend showing real-time status, contacts, messages, knowledge graph, memory, spreadsheets, identity editor, configuration, and live logs
 
 </details>
 
@@ -249,6 +251,85 @@ You describe what you want in natural language. The wizard infers your settings 
 | "professional support bot" | tone: professional, purpose: business_support |
 
 The wizard only asks follow-up questions for fields it couldn't infer. Most users are fully set up in **1-2 questions**.
+
+---
+
+## Monitoring Dashboard
+
+A full-featured web dashboard for real-time monitoring and management. Built with React + Tailwind CSS (frontend) and FastAPI (backend).
+
+```bash
+# The dashboard starts automatically with the bot daemon
+# Access it at the URL shown in the logs (typically port 5174)
+```
+
+### Overview
+
+Real-time system status, message volume charts, event type distribution, and top contacts -- all at a glance.
+
+<p align="center">
+  <img src="assets/dashboard/overview.png" alt="Dashboard Overview" width="800" />
+</p>
+
+### Contacts
+
+Browse all contacts with auto-generated profiles. Click any contact to see their full profile, knowledge graph entities, communication style analysis, and recent message history.
+
+<p align="center">
+  <img src="assets/dashboard/contacts.png" alt="Contacts List" width="800" />
+</p>
+
+<p align="center">
+  <img src="assets/dashboard/contact-detail.png" alt="Contact Detail View" width="800" />
+</p>
+
+### Messages
+
+Live message queue with priority scoring, status tracking, and escalation management. Switch between the message queue and escalation views.
+
+<p align="center">
+  <img src="assets/dashboard/messages.png" alt="Message Queue" width="800" />
+</p>
+
+### Spreadsheets
+
+View and manage Excel files created by the bot through conversations. Supports multiple sheets with tabbed navigation and full data table rendering.
+
+<p align="center">
+  <img src="assets/dashboard/spreadsheet-detail.png" alt="Spreadsheet Viewer" width="800" />
+</p>
+
+### Intelligence
+
+Four-tab intelligence center: **Knowledge Graph** (entities and relationships extracted from conversations), **Lessons Learned** (self-reflection insights), **Memory Files** (per-contact memory with resolved names), and **Scheduled Jobs**.
+
+<p align="center">
+  <img src="assets/dashboard/intelligence-kg.png" alt="Knowledge Graph" width="800" />
+</p>
+
+<p align="center">
+  <img src="assets/dashboard/intelligence-memory.png" alt="Memory Files" width="800" />
+</p>
+
+### Identity & Configuration
+
+Edit SOUL.md and USER.md directly from the browser with live save. Configure all bot settings across five tabs: Core, Privacy, Features, Limits, and Technical.
+
+<p align="center">
+  <img src="assets/dashboard/identity.png" alt="Identity Editor" width="800" />
+</p>
+
+<p align="center">
+  <img src="assets/dashboard/configuration.png" alt="Configuration Panel" width="800" />
+</p>
+
+### Live Logs
+
+Stream bot logs in real-time with color-coded severity levels. Includes a live-follow toggle and jump-to-bottom controls.
+
+<p align="center">
+  <img src="assets/dashboard/logs.png" alt="Live Logs" width="800" />
+</p>
 
 ---
 
@@ -593,13 +674,15 @@ bash scripts/start.sh status     # Check status
 |-----------|-----------|-------|
 | **Orchestrator** | Python 3.11+ asyncio | 2,339 |
 | **WhatsApp Bridge** | Node.js + Baileys | -- |
+| **Dashboard Backend** | Python FastAPI + SQLite | ~600 |
+| **Dashboard Frontend** | React 19 + Vite + Tailwind CSS | ~2,400 |
 | **LLM** | GPT-4.1-mini via AI Gateway | -- |
 | **Database** | SQLite (contacts, audit, escalations, sessions, cron, KG, reflection) | -- |
 | **Media** | ffmpeg, pdfplumber, Whisper API (Groq), vision API | -- |
 | **PDF Engine** | LaTeX via [latex-document skill](https://github.com/ndpvt-web/latex-document-skill) | -- |
 | **QR Auth** | Python HTTP server with auto-refresh | -- |
 | **Daemon** | Custom Python process supervisor | -- |
-| **Total** | **32 Python modules** | **11,072** |
+| **Total** | **48 modules** (35 Python + 13 JS/JSX) | **15,349** |
 
 ---
 
@@ -645,11 +728,29 @@ bash scripts/start.sh status     # Check status
 |   |-- bridge_manager.py        # Bridge process management
 |   |-- daemon.py                # Process supervisor
 |   |-- send_file.py             # CLI utility for sending files
-|   `-- integrations/
-|       |-- __init__.py           # Integration registry
-|       |-- base.py               # Abstract base class
-|       |-- spreadsheet.py        # Excel/spreadsheet tracking
-|       `-- email.py              # Email sending
+|   |-- integrations/
+|   |   |-- __init__.py           # Integration registry
+|   |   |-- base.py               # Abstract base class
+|   |   |-- spreadsheet.py        # Excel/spreadsheet tracking
+|   |   `-- email.py              # Email sending
+|   `-- dashboard/
+|       |-- api.py                # FastAPI backend (20+ REST endpoints)
+|       |-- __init__.py           # Dashboard launcher
+|       `-- frontend/             # React + Vite + Tailwind CSS
+|           `-- src/
+|               |-- App.jsx       # Router and layout
+|               |-- api.js        # API client
+|               |-- hooks.js      # Custom React hooks
+|               |-- ui.jsx        # Shared UI components
+|               `-- pages/        # 8 page components
+|                   |-- Overview.jsx
+|                   |-- Contacts.jsx
+|                   |-- Messages.jsx
+|                   |-- Spreadsheets.jsx
+|                   |-- Intelligence.jsx
+|                   |-- Identity.jsx
+|                   |-- Config.jsx
+|                   `-- Logs.jsx
 
 ~/.happycapy-whatsapp/           # Runtime data
 |-- config.json                  # Bot configuration
@@ -676,11 +777,17 @@ bash scripts/start.sh status     # Check status
 | Category | Package | Purpose |
 |----------|---------|---------|
 | **Python** | httpx | Async HTTP client |
+| | fastapi + uvicorn | Dashboard REST API |
 | | pdfplumber | PDF text extraction |
 | | qrcode + Pillow | QR code generation |
 | | reportlab | Fallback PDF generation |
 | **Node.js** | @whiskeysockets/baileys | WhatsApp Web API |
 | | ws | WebSocket server |
+| | react + react-dom | Dashboard UI framework |
+| | vite | Dashboard build tool |
+| | tailwindcss | Dashboard styling |
+| | recharts | Dashboard charts |
+| | lucide-react | Dashboard icons |
 | **System** | ffmpeg | Video/audio processing |
 | | pdflatex/xelatex | LaTeX compilation |
 

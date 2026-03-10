@@ -23,11 +23,13 @@ export interface InboundMessage {
   id: string;
   sender: string;
   pn: string;
+  pushName: string;           // Sender's self-set WhatsApp display name
   content: string;
   timestamp: number;
   isGroup: boolean;
   fromMe: boolean;
   participant?: string;       // Actual sender JID in group messages
+  participantPushName?: string; // Group participant's display name
   mentionedJids?: string[];   // @mentioned JIDs in the message
   groupSubject?: string;      // Group name/subject
   quotedMessageId?: string;   // stanzaId of the quoted/replied-to message
@@ -37,6 +39,14 @@ export interface InboundMessage {
   media_type?: string;
   media_mimetype?: string;
   media_filename?: string;
+}
+
+export interface ContactInfo {
+  jid: string;
+  name?: string;         // Name saved by user in phone book
+  notify?: string;       // Contact's self-set display name (pushName)
+  verifiedName?: string; // Verified business name
+  imgUrl?: string;
 }
 
 export interface HistorySyncEvent {
@@ -61,6 +71,7 @@ export interface WhatsAppClientOptions {
   onQR: (qr: string) => void;
   onStatus: (status: string) => void;
   onHistorySync?: (event: HistorySyncEvent) => void;
+  onContactsSync?: (contacts: ContactInfo[]) => void;
 }
 
 export class WhatsAppClient {
@@ -132,7 +143,22 @@ export class WhatsAppClient {
 
     // History sync: receive older messages on connection (syncFullHistory: true)
     this.sock.ev.on('messaging-history.set', (data: any) => {
-      const { messages, isLatest, progress, syncType } = data;
+      const { messages, contacts, isLatest, progress, syncType } = data;
+
+      // Forward synced contacts to Python
+      if (contacts && contacts.length > 0 && this.options.onContactsSync) {
+        const parsed: ContactInfo[] = contacts.map((c: any) => ({
+          jid: c.id || '',
+          name: c.name || undefined,
+          notify: c.notify || undefined,
+          verifiedName: c.verifiedName || undefined,
+        })).filter((c: ContactInfo) => c.jid);
+        if (parsed.length > 0) {
+          console.log(`Contact sync: ${parsed.length} contacts from history`);
+          this.options.onContactsSync(parsed);
+        }
+      }
+
       if (!messages || messages.length === 0) return;
 
       console.log(`History sync: ${messages.length} msgs, type=${syncType}, progress=${progress}, isLatest=${isLatest}`);
@@ -169,6 +195,39 @@ export class WhatsAppClient {
       }
     });
 
+    // Contact updates: Baileys fires this when messages arrive with pushName
+    this.sock.ev.on('contacts.update', (updates: any[]) => {
+      if (!this.options.onContactsSync) return;
+      const parsed: ContactInfo[] = updates
+        .filter((u: any) => u.id)
+        .map((u: any) => ({
+          jid: u.id,
+          name: u.name || undefined,
+          notify: u.notify || undefined,
+          verifiedName: u.verifiedName || undefined,
+        }));
+      if (parsed.length > 0) {
+        this.options.onContactsSync(parsed);
+      }
+    });
+
+    // Contact upserts: Baileys fires this on full contact additions
+    this.sock.ev.on('contacts.upsert', (contacts: any[]) => {
+      if (!this.options.onContactsSync) return;
+      const parsed: ContactInfo[] = contacts
+        .filter((c: any) => c.id)
+        .map((c: any) => ({
+          jid: c.id,
+          name: c.name || undefined,
+          notify: c.notify || undefined,
+          verifiedName: c.verifiedName || undefined,
+        }));
+      if (parsed.length > 0) {
+        console.log(`Contact upsert: ${parsed.length} contacts`);
+        this.options.onContactsSync(parsed);
+      }
+    });
+
     this.sock.ev.on('messages.upsert', async ({ messages, type }: { messages: any[]; type: string }) => {
       if (type !== 'notify') return;
 
@@ -185,6 +244,7 @@ export class WhatsAppClient {
           id: msg.key.id || '',
           sender: msg.key.remoteJid || '',
           pn: msg.key.remoteJidAlt || '',
+          pushName: msg.pushName || '',
           content: content || '',
           timestamp: msg.messageTimestamp as number,
           isGroup,
@@ -339,6 +399,39 @@ export class WhatsAppClient {
       console.log(`Requested ${count} history messages for ${chatJid}`);
     } catch (err) {
       console.error('fetchMessageHistory failed:', err);
+    }
+  }
+
+  async checkOnWhatsApp(phoneNumbers: string[]): Promise<Array<{jid: string; exists: boolean}>> {
+    if (!this.sock) throw new Error('Not connected');
+    return await this.sock.onWhatsApp(...phoneNumbers);
+  }
+
+  async addContact(jid: string, fullName: string, firstName?: string): Promise<void> {
+    if (!this.sock) throw new Error('Not connected');
+    const contact: any = { fullName };
+    if (firstName) contact.firstName = firstName;
+    contact.saveOnPrimaryAddressbook = true;
+    await this.sock.addOrEditContact(jid, contact);
+  }
+
+  async removeContact(jid: string): Promise<void> {
+    if (!this.sock) throw new Error('Not connected');
+    await this.sock.removeContact(jid);
+  }
+
+  async sendPresenceUpdate(jid: string, type: 'composing' | 'paused' | 'available'): Promise<void> {
+    if (!this.sock) throw new Error('Not connected');
+    await this.sock.presenceSubscribe(jid);
+    await this.sock.sendPresenceUpdate(type, jid);
+  }
+
+  async getProfilePicture(jid: string): Promise<string | null> {
+    if (!this.sock) throw new Error('Not connected');
+    try {
+      return await this.sock.profilePictureUrl(jid, 'preview');
+    } catch {
+      return null;
     }
   }
 

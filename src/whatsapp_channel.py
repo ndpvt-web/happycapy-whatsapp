@@ -123,11 +123,12 @@ class WhatsAppChannel:
     # Theorem T_PATHSAN: Regex for safe filename characters (P_PATHTR).
     _SAFE_FILENAME_RE = re.compile(r"[^a-zA-Z0-9_-]")
 
-    def __init__(self, config: dict[str, Any], on_message=None, on_group_message=None, on_history_sync=None):
+    def __init__(self, config: dict[str, Any], on_message=None, on_group_message=None, on_history_sync=None, on_contacts_sync=None):
         self.config = config
         self.on_message = on_message  # async callback(sender_id, chat_id, content, media_paths, metadata)
         self.on_group_message = on_group_message  # async callback(sender_id, group_jid, content, metadata)
         self.on_history_sync = on_history_sync  # async callback(messages, sync_type, progress, is_latest)
+        self.on_contacts_sync = on_contacts_sync  # async callback(contacts: list[dict])
         self._ws = None
         self._connected = False
         self._running = False
@@ -229,6 +230,20 @@ class WhatsAppChannel:
         for chunk in chunks:
             payload = {"type": "send", "to": chat_id, "text": chunk, "ownerApproved": True}
             await self._ws.send(json.dumps(payload, ensure_ascii=False))
+
+    async def send_typing(self, chat_id: str, composing: bool = True) -> None:
+        """Send typing indicator ('composing' or 'paused') to a chat."""
+        if not self._ws or not self._connected:
+            return
+        try:
+            payload = {
+                "type": "presence",
+                "jid": chat_id,
+                "presenceType": "composing" if composing else "paused",
+            }
+            await self._ws.send(json.dumps(payload))
+        except Exception:
+            pass  # Non-critical: typing indicator failure shouldn't break message flow
 
     async def send_media(self, chat_id: str, file_path: str) -> None:
         """Send a media file.
@@ -363,6 +378,7 @@ class WhatsAppChannel:
             pn = data.get("pn", "")
             sender = data.get("sender", "")
             content = data.get("content", "")
+            push_name = data.get("pushName", "")
             is_group = data.get("isGroup", False)
             from_me = data.get("fromMe", False)
 
@@ -412,6 +428,7 @@ class WhatsAppChannel:
                             "message_id": msg_id,
                             "participant": participant,
                             "participant_id": participant_id,
+                            "participant_name": data.get("participantPushName", "") or push_name,
                             "mentioned_jids": data.get("mentionedJids", []),
                             "group_subject": data.get("groupSubject", ""),
                             "timestamp": data.get("timestamp"),
@@ -476,6 +493,7 @@ class WhatsAppChannel:
                 "message_id": msg_id,
                 "timestamp": data.get("timestamp"),
                 "is_group": is_group,
+                "sender_name": push_name,  # WhatsApp pushName (sender's display name)
                 "media_type": media_type,
                 "media_mimetype": media_mimetype,
                 "media_filename": media_filename,
@@ -535,6 +553,12 @@ class WhatsAppChannel:
             print(f"[history-sync] {len(messages)} msgs, type={sync_type}, progress={progress}, latest={is_latest}")
             if self.on_history_sync and messages:
                 asyncio.create_task(self.on_history_sync(messages, sync_type, progress, is_latest))
+
+        elif msg_type == "contacts_sync":
+            contacts = data.get("contacts", [])
+            if contacts and self.on_contacts_sync:
+                asyncio.create_task(self.on_contacts_sync(contacts))
+                print(f"[contacts-sync] {len(contacts)} contacts received")
 
         elif msg_type == "error":
             print(f"Bridge error: {data.get('error')}")
@@ -615,6 +639,34 @@ class WhatsAppChannel:
             "application/pdf": ".pdf",
         }
         return ext_map.get(mime, fallback)
+
+    async def check_on_whatsapp(self, phone_numbers: list[str]) -> list[dict] | None:
+        """Check if phone numbers are registered on WhatsApp."""
+        if not self._ws or not self._connected:
+            return None
+        payload = {"type": "check_whatsapp", "phoneNumbers": phone_numbers}
+        await self._ws.send(json.dumps(payload))
+        return None  # Results come async via bridge response
+
+    async def add_contact(self, jid: str, full_name: str, first_name: str = "") -> None:
+        """Add or edit a contact in WhatsApp's synced contact list."""
+        if not self._ws or not self._connected:
+            print("Bridge not connected, cannot add contact")
+            return
+        payload: dict = {"type": "add_contact", "jid": jid, "fullName": full_name}
+        if first_name:
+            payload["firstName"] = first_name
+        await self._ws.send(json.dumps(payload, ensure_ascii=False))
+        print(f"[contacts] Add/edit contact: {jid} -> {full_name}")
+
+    async def remove_contact(self, jid: str) -> None:
+        """Remove a contact from WhatsApp's synced contact list."""
+        if not self._ws or not self._connected:
+            print("Bridge not connected, cannot remove contact")
+            return
+        payload = {"type": "remove_contact", "jid": jid}
+        await self._ws.send(json.dumps(payload))
+        print(f"[contacts] Remove contact: {jid}")
 
     def cleanup_media(self, max_age_hours: int = 0) -> int:
         """Remove media files older than max_age_hours.

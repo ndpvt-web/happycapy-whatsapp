@@ -61,10 +61,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "alert_on_auto_reply": False,
     # Privacy level: "strict" (never share cross-contact), "moderate", "open"
     "privacy_level": "strict",
-    # Fabrication policy: "strict" (always ask owner), "deflect", "relaxed"
-    "fabrication_policy": "strict",
     # Pluggable integrations: "core" (always), "spreadsheet", "email"
     "enabled_integrations": ["core"],
+    # Business template: pre-built personality pack (empty = no template)
+    "business_template": "",
 }
 
 # Environment variable overrides (Theorem T4)
@@ -80,97 +80,6 @@ ENV_OVERRIDES: dict[str, tuple[str, type]] = {
     "AI_MODEL": ("ai_model", str),
     "WHISPER_API_URL": ("whisper_api_url", str),
 }
-
-import re as _re
-
-# ── Intent parsing for dynamic setup wizard (Theorem T_DYNSETUP) ──
-# P_DYNSETUP: Users describe intent in natural language; fixed questionnaires
-# waste time asking what's already stated. Allowlist keyword matching extracts
-# config values from free-text, reducing follow-up questions to only ambiguous fields.
-
-# Rules are grouped by config field. Within each group, first match wins.
-# Groups are independent: matching "purpose" doesn't prevent matching "tone".
-_PURPOSE_RULES: list[tuple[_re.Pattern, str]] = [
-    (_re.compile(r"\b(?:monitor|watch|log|observe|alert|silent|spy)\b", _re.I), "monitoring_only"),
-    (_re.compile(r"\b(?:business|customer|support|client|sales|commerce)\b", _re.I), "business_support"),
-    (_re.compile(r"\b(?:team|coordinate|group project|standup|reminder)\b", _re.I), "team_coordination"),
-    (_re.compile(r"\b(?:personal|my messages|assistant|helper|buddy)\b", _re.I), "personal_assistant"),
-]
-
-_MODE_RULES: list[tuple[_re.Pattern, str]] = [
-    (_re.compile(r"\b(?:never reply|don'?t respond|no repl|silent mode)\b", _re.I), "monitor_only"),
-    (_re.compile(r"\b(?:monitor|watch|log|observe|silent|spy)\b", _re.I), "monitor_only"),
-    (_re.compile(r"\b(?:ask (?:me )?first|approve|confirm before|manual)\b", _re.I), "ask_before_reply"),
-    (_re.compile(r"\b(?:auto.?reply|automatic|just reply|respond auto)\b", _re.I), "auto_reply"),
-    (_re.compile(r"\b(?:reply|respond|answer|assistant|bot|help)\b", _re.I), "auto_reply"),
-]
-
-_TONE_RULES: list[tuple[_re.Pattern, str]] = [
-    (_re.compile(r"\b(?:casual|friendly|chill|relaxed|informal)\b", _re.I), "casual_friendly"),
-    (_re.compile(r"\b(?:professional|formal|corporate|polished)\b", _re.I), "professional"),
-    (_re.compile(r"\b(?:short|brief|concise|direct|terse|minimal)\b", _re.I), "concise_direct"),
-    (_re.compile(r"\b(?:warm|caring|empathetic|kind|gentle)\b", _re.I), "warm_empathetic"),
-]
-
-_FEATURE_RULES: list[tuple[_re.Pattern, dict[str, Any]]] = [
-    (_re.compile(r"\b(?:everyone|all contacts|anybody|anyone)\b", _re.I),
-     {"allowlist": [], "blocklist": []}),
-    (_re.compile(r"\b(?:transcri(?:be|ption)|voice.?to.?text|speech)\b", _re.I),
-     {"voice_transcription": True}),
-]
-
-# Phone number extraction: international formats like +852 92893658, 85292893658, etc.
-_PHONE_RE = _re.compile(r"(?:\+?\d[\d\s\-]{7,15}\d)")
-
-
-def parse_intent(user_text: str) -> dict[str, Any]:
-    """Extract config values from user's natural language description.
-
-    Theorem T_DYNSETUP: Keyword-based allowlist matching on free-text intent.
-    Returns a partial config dict with only the fields that could be inferred.
-    Fields NOT present in the returned dict are ambiguous and need follow-up.
-
-    Each field group (purpose, mode, tone) uses first-match-wins within the group,
-    so "monitor my business WhatsApp" correctly gives purpose=monitoring_only
-    (because "monitor" matches before "business" in the purpose rules).
-
-    Args:
-        user_text: The user's free-text description of their WhatsApp use case.
-
-    Returns:
-        Partial config dict (only inferred fields).
-    """
-    inferred: dict[str, Any] = {}
-
-    # First-match-wins within each independent field group
-    for pattern, purpose in _PURPOSE_RULES:
-        if pattern.search(user_text):
-            inferred["purpose"] = purpose
-            break
-
-    for pattern, mode in _MODE_RULES:
-        if pattern.search(user_text):
-            inferred["mode"] = mode
-            break
-
-    for pattern, tone in _TONE_RULES:
-        if pattern.search(user_text):
-            inferred["tone"] = tone
-            break
-
-    # Feature rules: all matching rules apply (not first-match-wins)
-    for pattern, values in _FEATURE_RULES:
-        if pattern.search(user_text):
-            inferred.update(values)
-
-    # Extract phone numbers for admin_number
-    phones = _PHONE_RE.findall(user_text)
-    if phones:
-        admin = _re.sub(r"[^\d]", "", phones[0])
-        inferred["admin_number"] = admin
-
-    return inferred
-
 
 CONFIG_DIR = Path.home() / ".happycapy-whatsapp"
 CONFIG_FILE = CONFIG_DIR / "config.json"

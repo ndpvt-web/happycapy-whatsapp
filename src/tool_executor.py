@@ -185,26 +185,6 @@ TOOL_DEFINITIONS: list[dict] = [
             },
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "description": (
-                "Search the web for current information. "
-                "Use when you need up-to-date info you don't have."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query",
-                    }
-                },
-                "required": ["query"],
-            },
-        },
-    },
 ]
 
 
@@ -246,26 +226,35 @@ class ToolExecutor:
         self._escalation = escalation  # EscalationEngine for ask_owner tool
         self.MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
-        # Load pluggable integrations
+        # Build unified handler map: core + integration tools
         self._integrations: dict = {}
-        self._integration_tool_map: dict = {}  # tool_name -> integration instance
+        self._handlers: dict[str, Any] = {
+            "generate_image": self._generate_image,
+            "generate_video": self._generate_video,
+            "create_pdf": self._create_pdf,
+            "send_message": self._send_message,
+            "ask_owner": self._ask_owner,
+        }
+        self._integration_tools: set[str] = set()
         self._load_integrations()
 
     def _load_integrations(self) -> None:
-        """Load enabled integrations from config."""
+        """Load enabled integrations and register their tool handlers."""
         enabled = self.config.get("enabled_integrations", ["core"])
         non_core = [n for n in enabled if n != "core"]
         if not non_core:
             return
         try:
-            from src.integrations import load_integrations, get_all_tool_definitions
+            from src.integrations import load_integrations
             self._integrations = load_integrations(
                 non_core, self.config,
                 client=self._client, channel=self._channel,
             )
             for name, integ in self._integrations.items():
                 for td in integ.tool_definitions():
-                    self._integration_tool_map[td["function"]["name"]] = integ
+                    tool_name = td["function"]["name"]
+                    self._handlers[tool_name] = integ
+                    self._integration_tools.add(tool_name)
         except Exception as e:
             print(f"[tool-executor] Failed to load integrations: {type(e).__name__}: {e}")
 
@@ -280,50 +269,31 @@ class ToolExecutor:
         """Execute a tool by name and return the result.
 
         Never raises -- all exceptions are caught and returned as ToolResult with success=False.
-        Checks core handlers first, then delegates to integrations.
         """
-        handlers = {
-            "generate_image": self._generate_image,
-            "generate_video": self._generate_video,
-            "create_pdf": self._create_pdf,
-            "send_message": self._send_message,
-            "ask_owner": self._ask_owner,
-            "web_search": self._web_search,
-        }
+        handler = self._handlers.get(tool_name)
+        if not handler:
+            return ToolResult(
+                success=False,
+                tool_name=tool_name,
+                content=f"Unknown tool: {tool_name}",
+                error_message=f"Unknown tool: {tool_name}",
+            )
 
-        handler = handlers.get(tool_name)
-        if handler:
-            try:
+        try:
+            if tool_name in self._integration_tools:
+                # Integration handler: handler is an integration instance
+                return await handler.execute(tool_name, arguments)
+            else:
+                # Core handler: handler is a bound method
                 return await handler(arguments)
-            except Exception as e:
-                print(f"[tool-executor] {tool_name} error: {type(e).__name__}")
-                return ToolResult(
-                    success=False,
-                    tool_name=tool_name,
-                    content=f"Tool execution failed: {type(e).__name__}",
-                    error_message=str(e),
-                )
-
-        # Delegate to integration if not a core tool
-        integ = self._integration_tool_map.get(tool_name)
-        if integ:
-            try:
-                return await integ.execute(tool_name, arguments)
-            except Exception as e:
-                print(f"[tool-executor] integration {tool_name} error: {type(e).__name__}")
-                return ToolResult(
-                    success=False,
-                    tool_name=tool_name,
-                    content=f"Tool execution failed: {type(e).__name__}",
-                    error_message=str(e),
-                )
-
-        return ToolResult(
-            success=False,
-            tool_name=tool_name,
-            content=f"Unknown tool: {tool_name}",
-            error_message=f"Unknown tool: {tool_name}",
-        )
+        except Exception as e:
+            print(f"[tool-executor] {tool_name} error: {type(e).__name__}")
+            return ToolResult(
+                success=False,
+                tool_name=tool_name,
+                content=f"Tool execution failed: {type(e).__name__}",
+                error_message=str(e),
+            )
 
     # ── Image Generation ──
 
@@ -743,21 +713,6 @@ class ToolExecutor:
                 f"Tell the contact you'll check and get back to them. "
                 f"Do NOT make up an answer — wait for the owner's response."
             ),
-        )
-
-    # ── Web Search (placeholder) ──
-
-    async def _web_search(self, args: dict[str, Any]) -> ToolResult:
-        """Placeholder for web search. Not yet implemented."""
-        query = args.get("query", "").strip()
-        if not query:
-            return ToolResult(False, "web_search", "No search query provided")
-
-        return ToolResult(
-            success=False,
-            tool_name="web_search",
-            content="Web search is not yet available. Please try again later.",
-            error_message="Not implemented",
         )
 
     # ── Helpers ──
