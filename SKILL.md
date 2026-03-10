@@ -23,88 +23,120 @@ bash ~/.claude/skills/happycapy-whatsapp/scripts/setup.sh
 
 Check if `~/.happycapy-whatsapp/config.json` exists. If NOT, run the **dynamic setup wizard**.
 
+The wizard uses AskUserQuestion to gather user intent dynamically. The goal: **minimum questions, maximum configuration**. Most users should be fully set up in 1-2 AskUserQuestion calls.
+
 #### Phase 1: Open-ended intent gathering
 
 Use AskUserQuestion with a SINGLE open-ended question:
 - header: "WhatsApp Setup"
 - question: "What would you like to do with WhatsApp? Describe your use case and I'll configure everything automatically. You can also mention your phone number if you'd like admin access."
 - options:
-  - "Personal AI assistant that replies to my messages" - Auto-reply to personal chats with AI
+  - "Personal assistant -- replies as me" (Recommended) - Bot impersonates you, replies to chats as if you typed it
+  - "Business automation -- orders, invoices, tracking" - Log orders to spreadsheets, send invoices via email, handle customer messages
+  - "AI assistant bot -- transparent AI helper" - Bot identifies as an AI assistant helping on your behalf
   - "Monitor messages without replying" - Log and observe WhatsApp activity silently
-  - "Business customer support bot" - Handle customer inquiries automatically
 - multiSelect: false
 
 The user may select an option OR type a custom free-text description via "Other".
 
 #### Phase 2: Intent analysis and config inference
 
-Analyze the user's response to extract as many config values as possible. Use these inference rules:
+Analyze the user's response to extract as many config values as possible. Use ALL these inference rules:
+
+**Core fields:**
 
 | Signal in user's response | Config inference |
 |---|---|
-| "monitor", "watch", "log", "observe", "alert" | purpose: "monitoring_only", mode: "monitor_only" |
-| "personal", "my messages", "assistant" | purpose: "personal_assistant", mode: "auto_reply" |
-| "business", "customer", "support", "client" | purpose: "business_support", mode: "auto_reply", tone: "professional" |
-| "team", "coordinate", "group", "project" | purpose: "team_coordination", mode: "auto_reply" |
+| "monitor", "watch", "log", "observe", "alert", "silent" | purpose: "monitoring_only", mode: "monitor_only" |
+| "personal", "my messages", "as me", "impersonate" | purpose: "personal_assistant", mode: "auto_reply", personality_mode: "impersonate" |
+| "business", "customer", "support", "client", "orders" | purpose: "business_support", mode: "auto_reply", tone: "professional" |
+| "team", "coordinate", "group project", "standup" | purpose: "team_coordination", mode: "auto_reply" |
+| "assistant", "AI assistant", "bot", "helper" | personality_mode: "assistant" |
+| "as me", "pretend to be me", "impersonate", "act as me" | personality_mode: "impersonate" |
 | Phone number mentioned (e.g. +852 92893658) | admin_number: extracted digits |
-| "everyone", "all contacts" | allowlist: [] (empty = everyone) |
+| "everyone", "all contacts", "anybody" | allowlist: [] (empty = everyone) |
 | "only [name/number]", "specific people" | Follow up for allowlist numbers |
-| "casual", "friendly", "chill" | tone: "casual_friendly" |
-| "professional", "formal", "business" | tone: "professional" |
-| "short", "brief", "concise" | tone: "concise_direct" |
-| "never reply", "don't respond", "silent" | mode: "monitor_only" |
-| "ask me first", "approve", "confirm" | mode: "ask_before_reply" |
+| "casual", "friendly", "chill", "relaxed" | tone: "casual_friendly" |
+| "professional", "formal", "corporate" | tone: "professional" |
+| "short", "brief", "concise", "direct" | tone: "concise_direct" |
+| "warm", "caring", "empathetic", "kind" | tone: "warm_empathetic" |
+| "never reply", "don't respond", "silent mode" | mode: "monitor_only" |
+| "ask me first", "approve", "confirm before" | mode: "ask_before_reply" |
+| "auto reply", "automatic", "just reply" | mode: "auto_reply" |
 
-#### Phase 3: Verification gate -- check you have everything
+**Integration signals (infer enabled_integrations):**
 
-After inference, verify you have ALL the information needed. The fields are split into three tiers:
+| Signal in user's response | Config inference |
+|---|---|
+| "spreadsheet", "excel", "track orders", "log data", "inventory" | enabled_integrations includes "spreadsheet" |
+| "email", "invoice", "send bills", "receipt", "notification" | enabled_integrations includes "email" |
+| "business", "orders", "B2B", "small business" | enabled_integrations: ["core", "spreadsheet", "email"] (both) |
 
-**REQUIRED (must ask if missing -- the bot cannot work well without these):**
+**Personality & safety signals (infer from context):**
+
+| Signal / context | Config inference |
+|---|---|
+| Selected "Personal assistant -- replies as me" | personality_mode: "impersonate", privacy_level: "strict", fabrication_policy: "strict" |
+| Selected "Business automation" | personality_mode: "assistant", privacy_level: "strict", fabrication_policy: "deflect", enabled_integrations: ["core", "spreadsheet", "email"] |
+| Selected "AI assistant bot" | personality_mode: "assistant", privacy_level: "moderate", fabrication_policy: "deflect" |
+| Selected "Monitor messages" | personality_mode: "assistant", privacy_level: "strict", fabrication_policy: "strict" |
+| "private", "strict", "don't share" | privacy_level: "strict" |
+| Name mentioned ("I'm John", "my name is Sarah") | owner_name: extracted name |
+
+#### Phase 3: Verification gate -- ask ONLY what's missing
+
+After inference, check what you have vs what's missing. Fields are split into tiers:
+
+**REQUIRED (must ask if missing -- bot cannot work well without these):**
 
 | Field | Why required |
 |---|---|
 | `purpose` | Determines the entire system prompt personality |
 | `mode` | Controls whether bot replies at all -- wrong default = spam or silence |
-| `admin_number` | Needed for admin slash commands, security alerts, and error notifications |
+| `admin_number` | Needed for admin commands, security alerts, error notifications |
 
 **IMPORTANT (should ask if missing -- affects quality and safety):**
 
 | Field | Why important |
 |---|---|
+| `personality_mode` | "impersonate" vs "assistant" fundamentally changes bot behavior |
 | `tone` | Directly affects how the bot sounds to contacts |
 | `allowlist` / contact scope | Wrong default could mean replying to strangers |
+| `enabled_integrations` | User may want spreadsheet/email features but not know to ask |
 
-**OPTIONAL (safe to use smart defaults):**
+**OPTIONAL (safe to use smart defaults -- never ask about these):**
 
 | Field | Default | Rationale |
 |---|---|---|
+| privacy_level | "strict" | Safest default, never leaks info |
+| fabrication_policy | "strict" | Safest default, asks owner when unsure |
 | voice_transcription | true | Users generally want this |
 | media_handling | "acknowledge" | Safe, non-committal |
 | group_policy | "monitor" | Never auto-reply in groups (safe) |
+| owner_name | "" | Bot works fine without it |
+| quiet_hours_enabled | false | Can enable later via /quiet command |
+| All technical fields | (see Phase 5) | Infrastructure, never user-facing |
 
 **Verification procedure:**
 
 1. After Phase 2 inference, make a checklist of what you have vs what's missing.
-2. Collect ALL missing REQUIRED + IMPORTANT fields into a SINGLE AskUserQuestion call (up to 4 questions max). Use one question per missing field group.
-3. If the user's Phase 1 answer was a preset option (not free text), you will likely be missing most fields -- ask for them all in one go.
+2. Collect ALL missing REQUIRED + IMPORTANT fields into a SINGLE AskUserQuestion call (up to 4 questions max).
+3. If the user's Phase 1 answer was a preset option (not free text), you likely have most fields from the preset inference rules above -- only ask for what's truly missing.
 4. NEVER silently default a REQUIRED field. Always ask.
+5. **Skip irrelevant questions**: If mode is "monitor_only", don't ask about tone, personality_mode, or integrations. If personality_mode is already clear, don't ask again.
 
-**Example: User selected "Personal AI assistant that replies to my messages"**
-
-You inferred: purpose=personal_assistant, mode=auto_reply.
-Missing REQUIRED: admin_number. Missing IMPORTANT: tone, contact scope.
-Ask ONE AskUserQuestion with up to 3 questions:
+**Question templates for missing fields:**
 
 ```
-Question 1 (header: "Admin"):
+Admin number (header: "Admin"):
   "What is your phone number? This will be your admin number for controlling the bot via WhatsApp."
-  Options: (let user type via "Other" -- provide example formats as options)
+  Options: (let user type via "Other")
   - "+1 555 123 4567" - US format example
   - "+44 7911 123456" - UK format example
   - "+852 9289 3658" - HK format example
   multiSelect: false
 
-Question 2 (header: "Tone"):
+Tone (header: "Tone"):
   "What tone should the bot use when replying?"
   Options:
   - "Casual & Friendly (Recommended)" - Relaxed, conversational
@@ -113,86 +145,141 @@ Question 2 (header: "Tone"):
   - "Warm & Empathetic" - Caring and understanding
   multiSelect: false
 
-Question 3 (header: "Contacts"):
+Contacts (header: "Contacts"):
   "Who should the bot respond to?"
   Options:
   - "Everyone (Recommended)" - Reply to all personal messages
   - "Only my number" - Only reply to admin
   - "Specific contacts" - I'll provide phone numbers
   multiSelect: false
+
+Personality (header: "Personality"):
+  "How should the bot behave when replying?"
+  Options:
+  - "Act as me (Recommended)" - Impersonate you, never reveal it's AI
+  - "AI Assistant" - Transparent AI helper, can say it's a bot
+  multiSelect: false
+
+Integrations (header: "Features"):
+  "Which extra features would you like?"
+  Options:
+  - "Just AI chat (Recommended)" - Core features only
+  - "Spreadsheet tracking" - Log orders, expenses, data to Excel
+  - "Email sending" - Send emails via the bot
+  - "Both spreadsheet + email" - Full business suite
+  multiSelect: false
 ```
 
-**Example: User typed "monitor my business WhatsApp and alert me on +852 92893658"**
+**Example flow: User selected "Personal assistant -- replies as me"**
 
-You inferred: purpose=monitoring_only, mode=monitor_only, admin_number=85292893658.
-Missing REQUIRED: nothing. Missing IMPORTANT: nothing (tone irrelevant for monitor-only, contacts irrelevant since not replying).
+Inferred from preset: purpose=personal_assistant, mode=auto_reply, personality_mode=impersonate, privacy_level=strict, fabrication_policy=strict.
+Missing REQUIRED: admin_number. Missing IMPORTANT: tone, contacts.
+Ask ONE AskUserQuestion with 3 questions: Admin, Tone, Contacts.
+
+**Example flow: User selected "Business automation -- orders, invoices, tracking"**
+
+Inferred from preset: purpose=business_support, mode=auto_reply, personality_mode=assistant, tone=professional, privacy_level=strict, fabrication_policy=deflect, enabled_integrations=["core","spreadsheet","email"].
+Missing REQUIRED: admin_number. Missing IMPORTANT: contacts.
+Ask ONE AskUserQuestion with 2 questions: Admin, Contacts.
+
+**Example flow: User typed "monitor my business WhatsApp +852 92893658"**
+
+Inferred: purpose=monitoring_only, mode=monitor_only, admin_number=85292893658.
+Missing: nothing relevant (monitor mode doesn't need tone/personality/integrations).
 --> No follow-up needed. Proceed to Phase 4.
 
-**Example: User typed "I want a WhatsApp bot"**
+**Example flow: User typed "I want a WhatsApp bot for my bakery, take orders and email receipts"**
 
-You inferred: mode=auto_reply (from "bot").
-Missing REQUIRED: purpose, admin_number. Missing IMPORTANT: tone, contact scope.
-Ask ONE AskUserQuestion with all 4:
-
-```
-Question 1 (header: "Purpose"):
-  "What should the bot do?"
-  Options:
-  - "Personal Assistant (Recommended)" - Help with personal messages
-  - "Business Support" - Handle customer inquiries
-  - "Team Coordination" - Coordinate team activities
-
-Question 2 (header: "Admin"):
-  "What is your phone number for admin access?"
-  (same format as above)
-
-Question 3 (header: "Tone"):
-  (same as above)
-
-Question 4 (header: "Contacts"):
-  (same as above)
-```
+Inferred: purpose=business_support, mode=auto_reply, tone=professional, personality_mode=assistant, enabled_integrations=["core","spreadsheet","email"].
+Missing REQUIRED: admin_number. Missing IMPORTANT: contacts.
+Ask ONE AskUserQuestion with 2 questions: Admin, Contacts.
 
 If "Specific contacts" is selected for contacts, do ONE more follow-up asking for comma-separated phone numbers.
 
-#### Phase 4: Apply defaults for OPTIONAL fields only
+#### Phase 4: Apply smart defaults for all unresolved OPTIONAL fields
 
-After all REQUIRED and IMPORTANT fields are resolved (from inference + follow-up questions), apply smart defaults ONLY for optional fields that were not explicitly set:
+After all REQUIRED and IMPORTANT fields are resolved, apply defaults:
 
 | Field | Default | Rationale |
 |---|---|---|
+| personality_mode | "impersonate" | Most natural for personal use |
+| privacy_level | "strict" | Safest -- never shares cross-contact info |
+| fabrication_policy | "strict" if impersonate, "deflect" if assistant | Impersonate must never make things up |
 | voice_transcription | true | Users generally want this |
+| voice_transcription_provider | "groq" | Fast and free |
 | media_handling | "acknowledge" | Safe, non-committal |
 | group_policy | "monitor" | Never auto-reply in groups |
+| enabled_integrations | ["core"] | No extra features unless asked |
+| owner_name | "" | Bot works without it |
+| alert_on_auto_reply | false if impersonate, true if assistant | Impersonate handles it; assistant should notify |
+| quiet_hours_enabled | false | Can enable later |
+| tool_calling_enabled | true | Image/video/PDF generation |
+| escalation_enabled | true | Smart alerts for important messages |
+| importance_threshold | 7 | Balanced sensitivity |
 | bridge_port | 3002 | Standard port |
 | qr_server_port | 8765 | Standard port |
 
-**Tone special case:** If mode is "monitor_only", tone defaults to "casual_friendly" silently (it won't be used anyway since the bot doesn't reply). Do NOT ask the user about tone for monitor-only mode.
+**Tone special case:** If mode is "monitor_only", tone defaults to "casual_friendly" silently (won't be used). Do NOT ask about tone for monitor-only mode.
 
 #### Phase 5: Save config
 
-After resolving all fields, save using Python:
+After resolving all fields, save the COMPLETE config using Python:
+
 ```python
-import json, os
+import json
 from pathlib import Path
 
 config = {
+    # Core (from inference + questions)
     "purpose": "<inferred or asked>",
-    "tone": "<inferred or asked>",
+    "tone": "<inferred or asked or defaulted>",
     "mode": "<inferred or asked>",
     "admin_number": "<inferred or asked>",
-    "allowlist": [],  # or specific numbers from follow-up
+    "personality_mode": "<inferred or defaulted>",
+    "owner_name": "<inferred or empty>",
+    # Contact filtering
+    "allowlist": [],  # or specific numbers
     "blocklist": [],
-    "voice_transcription": True,  # default
-    "media_handling": "acknowledge",  # default
+    # Privacy & safety
+    "privacy_level": "<inferred or defaulted>",
+    "fabrication_policy": "<inferred or defaulted>",
+    # Integrations
+    "enabled_integrations": ["core"],  # or ["core", "spreadsheet", "email"]
+    # Media & voice
+    "voice_transcription": True,
+    "voice_transcription_provider": "groq",
+    "media_handling": "acknowledge",
     "group_policy": "monitor",
+    # Alerts & intelligence
+    "alert_on_auto_reply": False,  # True for assistant mode
+    "escalation_enabled": True,
+    "importance_threshold": 7,
+    "status_override": "",
+    "auto_reply_when_busy": True,
+    "group_keywords": [],
+    # Quiet hours (off by default)
+    "quiet_hours_enabled": False,
+    "quiet_hours_start": "23:00",
+    "quiet_hours_end": "07:00",
+    "quiet_hours_timezone": "UTC",
+    "quiet_hours_override_threshold": 9,
+    # Tool calling
+    "tool_calling_enabled": True,
+    # Technical (never ask user)
+    "tone_custom_instructions": "",
+    "system_prompt_override": "",
     "bridge_port": 3002,
     "qr_server_port": 8765,
     "auth_dir": str(Path.home() / ".happycapy-whatsapp" / "whatsapp-auth"),
-    "ai_gateway_url": "https://ai-gateway.happycapy.ai/api/v1",
-    "ai_model": "claude-sonnet-4-6",
+    "log_level": "INFO",
+    "bridge_token": "",
+    "ai_gateway_url": "https://ai-gateway.happycapy.ai/api/v1/openai/v1",
+    "ai_model": "gpt-4.1-mini",
+    "profile_model": "gpt-4.1-mini",
     "max_message_length": 4000,
-    "rate_limit_per_minute": 30
+    "rate_limit_per_minute": 30,
+    "media_max_age_hours": 24,
+    "whisper_api_url": "https://api.groq.com/openai/v1/audio/transcriptions",
 }
 Path.home().joinpath(".happycapy-whatsapp").mkdir(parents=True, exist_ok=True)
 Path.home().joinpath(".happycapy-whatsapp", "config.json").write_text(json.dumps(config, indent=2))
@@ -200,19 +287,43 @@ Path.home().joinpath(".happycapy-whatsapp", "config.json").write_text(json.dumps
 
 #### Phase 6: Confirm back to user
 
-**Always tell the user what was configured** with a summary showing every resolved field, so they can correct anything wrong. Format as a clear list:
+**Always tell the user what was configured** with a summary. Only show user-facing fields, not technical internals:
 
-Example:
+Example for personal use:
 ```
 Here's your WhatsApp configuration:
 - Purpose: Personal Assistant
+- Personality: Impersonate (replies as you, never reveals AI)
 - Mode: Auto-reply
 - Tone: Casual & friendly
 - Admin: +852 9289 3658
 - Contacts: Everyone
+- Privacy: Strict (never shares info between contacts)
 - Voice: Transcription enabled
-- Media: Acknowledge
 - Groups: Monitor only
+
+Starting services now...
+```
+
+Example for business use:
+```
+Here's your WhatsApp configuration:
+- Purpose: Business Support
+- Personality: AI Assistant (transparent)
+- Mode: Auto-reply
+- Tone: Professional
+- Admin: +1 555 123 4567
+- Contacts: Everyone
+- Privacy: Strict
+- Integrations: Spreadsheet tracking + Email sending
+- Voice: Transcription enabled
+- Groups: Monitor only
+
+Your bot can now:
+- Log orders/data to Excel spreadsheets
+- Send emails (invoices, confirmations) via the bot
+- Generate images, videos, and PDFs
+- Reply to customer messages automatically
 
 Starting services now...
 ```
