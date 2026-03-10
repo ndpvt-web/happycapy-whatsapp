@@ -1,396 +1,263 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/ndpvt-web/happycapy-whatsapp/main/assets/logo.png" alt="HappyCapy WhatsApp" width="120" />
+  <img src="assets/banner.png" alt="HappyCapy WhatsApp" width="800" />
 </p>
 
 <h1 align="center">HappyCapy WhatsApp</h1>
 
 <p align="center">
-  <strong>AI-powered WhatsApp automation with identity impersonation, adaptive memory, and enterprise-grade intelligence</strong>
+  <strong>Your WhatsApp, supercharged with AI. Replies as you. Learns from mistakes. Never leaks secrets.</strong>
 </p>
 
 <p align="center">
-  <a href="#features">Features</a> &bull;
-  <a href="#architecture">Architecture</a> &bull;
-  <a href="#quick-start">Quick Start</a> &bull;
-  <a href="#setup-wizard">Setup Wizard</a> &bull;
-  <a href="#admin-commands">Admin Commands</a> &bull;
-  <a href="#security">Security</a> &bull;
-  <a href="#configuration">Configuration</a>
+  <img src="https://img.shields.io/badge/python-3.11+-blue?logo=python&logoColor=white" alt="Python 3.11+" />
+  <img src="https://img.shields.io/badge/node.js-20+-green?logo=node.js&logoColor=white" alt="Node.js 20+" />
+  <img src="https://img.shields.io/badge/lines_of_code-11%2C072-blueviolet" alt="Lines of Code" />
+  <img src="https://img.shields.io/badge/modules-32-orange" alt="32 Modules" />
+  <img src="https://img.shields.io/badge/security_layers-7-red" alt="7 Security Layers" />
+  <img src="https://img.shields.io/badge/license-proprietary-lightgrey" alt="License" />
+</p>
+
+<p align="center">
+  <a href="#-what-it-does">What It Does</a> &ensp;|&ensp;
+  <a href="#-key-features">Key Features</a> &ensp;|&ensp;
+  <a href="#-how-it-works">How It Works</a> &ensp;|&ensp;
+  <a href="#-getting-started">Getting Started</a> &ensp;|&ensp;
+  <a href="#-admin-commands">Admin Commands</a> &ensp;|&ensp;
+  <a href="#-security">Security</a> &ensp;|&ensp;
+  <a href="#-configuration">Configuration</a>
 </p>
 
 ---
 
-## Overview
+## What It Does
 
-HappyCapy WhatsApp is a full-featured WhatsApp automation skill that connects to your personal or business WhatsApp account and operates as an intelligent AI agent. It can **impersonate you** (contacts never know it's AI), act as a transparent AI assistant, or silently monitor messages -- all configurable through an interactive setup wizard or 30+ admin commands sent directly via WhatsApp.
+HappyCapy WhatsApp connects to your personal or business WhatsApp account and acts as an intelligent AI agent that **replies to messages as if you typed them yourself**. Your contacts never know it's AI.
 
-The system is built on a modular intelligence layer with 20+ specialized modules covering everything from per-contact personality adaptation to knowledge graph-based context retrieval, fabrication detection, prompt injection defense, and self-learning reflection.
+<table>
+<tr>
+<td width="50%">
 
-### Key Differentiators
+### The Problem
 
-- **Identity impersonation**: The bot acts AS you, matching your texting style per contact. It never reveals it's AI, even when directly asked.
-- **Per-contact memory isolation**: Each contact has their own memory silo. Contact A's conversations are never leaked to Contact B.
-- **Self-learning reflection**: The bot learns from its own mistakes and your corrections over time, building a lessons-learned database.
-- **12-layer context assembly**: System prompts are assembled from security anchors, identity files, config, memory, profiles, RAG, integrations, and learned lessons.
-- **Multimodal understanding**: Images, PDFs, voice messages, videos, and stickers are all understood and processed automatically.
-- **Tool calling**: Generate images, videos, PDFs (via LaTeX compilation), send messages to other contacts, search the web, and escalate questions to the owner -- all from within a WhatsApp conversation.
+- You get too many WhatsApp messages to reply to
+- You miss important messages when busy
+- Contacts wait hours or days for a response
+- You want AI help but don't want contacts knowing
 
----
+</td>
+<td width="50%">
 
-## Features
+### The Solution
 
-### Core Messaging
+- AI replies instantly in **your voice and style**
+- Important messages get **escalated to you** with one-tap reply
+- Per-contact **memory isolation** means no secrets leak
+- Bot **learns from your corrections** and gets better over time
 
-| Feature | Description |
-|---------|-------------|
-| **Auto-reply** | AI responds to messages automatically using LLM (GPT-4.1-mini via AI Gateway) |
-| **Three modes** | `auto_reply` (fully automatic), `ask_before_reply` (human approval), `monitor_only` (silent logging) |
-| **Four tone presets** | Casual & Friendly, Professional, Concise & Direct, Warm & Empathetic |
-| **Two personality modes** | `impersonate` (act as owner, deny being AI) or `assistant` (transparent AI helper) |
-| **Reasoning suppression** | AI thinking/reasoning is stripped before sending -- contacts only see the final response |
-| **Rate limiting** | Configurable messages-per-minute cap to prevent spam |
-| **Message length cap** | Configurable max message length (default 4000 chars) |
-
-### Intelligence Layer
-
-The bot includes a nanobot-inspired intelligence layer with 15+ specialized modules:
-
-#### Message Scoring & Routing
-
-- **Importance Scorer** (`importance_scorer.py`): Every message gets a 1-10 importance score based on urgency keywords, contact familiarity, repetition patterns, question marks, caps lock, and exclamation marks. Group messages scored on a 0-100 scale.
-- **Message Queue** (`message_queue.py`): All inbound messages are queued with their importance scores. Supports priority ordering, reply tracking, and bulk cleanup.
-- **Escalation Engine** (`escalation_engine.py`): When the AI cannot answer or a message scores above the threshold, it escalates to the admin with a unique code (e.g., `ESC-001`). Admin responds via `/respond ESC-001 <answer>` and the reply is routed back to the original contact.
-- **Auto-Reply Templates** (`auto_reply_templates.py`): Built-in and custom quick-reply templates for busy/DND status (e.g., "I'm busy right now, I'll get back to you").
-
-#### Memory & Context
-
-- **Two-Layer Memory** (`memory_store.py`): Per-contact `MEMORY.md` (long-term facts) and `HISTORY.md` (timestamped event log). LLM consolidation runs periodically to summarize conversations into structured memory.
-- **Memory Isolation**: Each contact's memory lives in an isolated directory (`memory/contacts/{hash}/`). Contact A's memory is never visible to Contact B.
-- **Memory Search** (`MemorySearch`): Keyword + date-range + topic search over history with fuzzy matching and recency scoring.
-- **Knowledge Graph** (`knowledge_graph.py`): LightRAG-inspired graph that extracts entities (people, places, topics) and relationships from conversations via LLM. Context is retrieved via entity subgraph traversal instead of keyword search.
-- **Context Builder** (`context_builder.py`): Assembles the system prompt from 12 layers:
-
-```
-Layer  1: Security Anchor (immutable identity + anti-injection)
-Layer  2: SOUL.md (bot personality - editable)
-Layer  3: USER.md (owner profile - editable)
-Layer  4: Config instructions (purpose, tone, mode)
-Layer  5: Privacy rules (strict/moderate/open)
-Layer  6: Anti-fabrication rules (strict/deflect/relaxed)
-Layer  7: Per-contact MEMORY.md (long-term facts)
-Layer  8: Per-contact HISTORY.md (recent events)
-Layer  9: Contact profile (communication style)
-Layer 10: RAG context (relevant past conversations)
-Layer 11: Integration instructions (spreadsheet, email)
-Layer 12: Reasoning suppression (reply tag enforcement)
-+ Bonus: Learned lessons from reflection engine
-+ Bonus: Escalation context for admin replies
-```
-
-#### Contact Intelligence
-
-- **Contact Profiles** (`contact_store.py`): After 5 messages, the bot auto-generates a profile for each contact via LLM analysis: tone, formality, emoji usage, language, relationship type, topics, interaction frequency, and sample phrases. Re-analyzed every 10 new messages.
-- **Session Manager** (`session_manager.py`): Tracks per-contact conversation sessions with timeout-based freshness. When a contact resumes after 30+ minutes of inactivity, context signals help the AI decide whether to continue or start fresh.
-
-#### Self-Learning & Reflection
-
-- **Reflection Engine** (`reflection_engine.py`): Three learning signals:
-  1. **Owner corrections**: When you manually type in a contact's chat (overriding the bot), it's recorded as a correction lesson.
-  2. **Escalation feedback**: Answers to `/respond` commands are stored for future reuse on similar questions.
-  3. **Self-reflection**: Periodic LLM-powered analysis of recent interactions identifies mistakes, tone mismatches, fabrication, and areas for improvement.
-- Lessons are stored in SQLite with relevance scoring and automatic expiry (90 days).
-- Active lessons are injected into the system prompt so the AI applies them.
-
-#### Security Guards
-
-- **Content Filter** (`content_filter.py`): Scans ALL outbound messages for API keys, bearer tokens, private keys, AWS access keys, OpenAI/Anthropic keys, GitHub tokens, Slack tokens, system prompt markers, internal file paths, and credit card numbers. Blocks before sending.
-- **Fabrication Guard** (`fabrication_guard.py`): Detects when the AI fabricates personal claims (location, activity, companions, availability, emotional state). Vague deflections are allowed; specific fabrications are blocked and replaced with safe responses.
-- **Semantic Guard** (`semantic_guard.py`): LLM-as-judge prompt injection defense. Classifies inbound messages for 8 attack categories: identity override, instruction override, prompt extraction, privilege escalation, delimiter framing, indirect injection, data exfiltration, and safety bypass.
-- **Privacy Levels**: Three configurable levels (`strict`, `moderate`, `open`) controlling cross-contact information sharing.
-- **Fabrication Policy**: Three policies (`strict`, `deflect`, `relaxed`) controlling what happens when the AI doesn't know something.
-
-### Media Intelligence
-
-#### Inbound Understanding (automatic)
-
-| Media Type | Processing |
-|-----------|-----------|
-| **Images** | Sent to AI via multimodal vision API -- the bot can see and describe images |
-| **PDFs** | Text extracted via pdfplumber and included in AI context |
-| **Voice messages** | Transcribed to text via Whisper API (Groq) |
-| **Videos** | Keyframe extracted for vision + audio extracted for transcription |
-| **Stickers** | Analyzed via vision API like images |
-| **Documents** | PDF text extraction; other formats acknowledged with metadata |
-
-#### Outbound Generation (via tool calling)
-
-| Tool | Description |
-|------|-------------|
-| `generate_image` | AI image generation from text prompts |
-| `generate_video` | AI video generation (6-10 seconds, configurable aspect ratio) |
-| `create_pdf` | Professional PDF documents compiled from LaTeX source via the [latex-document skill](https://github.com/ndpvt-web/latex-document-skill) with multi-pass compilation and automatic engine detection |
-| `send_message` | Send text, images, PDFs, or videos to any contact by phone number |
-| `ask_owner` | Escalate questions to the admin when the bot doesn't know the answer |
-| `web_search` | Search the web for current information |
-
-### Pluggable Integrations
-
-The integration framework (`src/integrations/`) supports plug-and-play modules:
-
-| Integration | Features |
-|------------|----------|
-| **Spreadsheet** (`spreadsheet.py`) | Log orders, expenses, and data to Excel spreadsheets. Tools: `log_to_spreadsheet`, `read_spreadsheet`, `search_spreadsheet` |
-| **Email** (`email.py`) | Send emails via the bot. Tools: `send_email` |
-
-Adding a new integration requires a single Python file with a class extending `BaseIntegration`.
-
-### Scheduling & Automation
-
-- **Cron Service** (`cron_service.py`): SQLite-backed scheduler with asyncio timer execution.
-  - One-shot reminders: `/remind 30 Call back John` (fires in 30 minutes)
-  - Recurring tasks: `/cron every 60 Check inventory` (every 60 minutes)
-  - Job management: `/cron list`, `/cron del <id>`
-- **Heartbeat Service** (`heartbeat_service.py`): Periodic maintenance tasks running every 30 minutes:
-  - Message queue cleanup
-  - Audit log pruning
-  - Escalation expiry
-  - Conversation sample pruning
-  - Knowledge graph extraction
-
-### Group Monitoring
-
-- **Monitor mode**: Groups are never auto-replied to (safety). All group messages are logged and scored.
-- **Group Search**: FTS5-powered full-text search over group message history (`/groupsearch <query>`).
-- **Group scoring**: 0-100 scale with factors for @mentions, keyword matches, urgent words, and question patterns.
-- **Keyword alerts**: Configure keywords that trigger admin notifications for group messages.
-
-### Quiet Hours
-
-- **Timezone-aware**: Configure start/end times with timezone (e.g., `Asia/Hong_Kong`).
-- **Alert queuing**: Non-urgent notifications are queued during quiet hours and flushed as a digest when hours end.
-- **Override threshold**: Messages scoring above the threshold (default 9/10) bypass quiet hours.
-- **Admin commands**: `/quiet on|off`, `/quiet set 23:00 07:00 Asia/Hong_Kong`.
-
-### Health Monitoring
-
-- **System health**: `/health` shows uptime, memory usage, messages processed, messages/minute, active chats, connection status.
-- **Audit log** (`audit_log.py`): Every message (in/out), admin command, security event, and error is logged with timestamps in SQLite. View via `/audit`.
+</td>
+</tr>
+</table>
 
 ---
 
-## Architecture
+## Key Features
 
-```
-                                 +-------------------+
-                                 |   WhatsApp Cloud  |
-                                 +--------+----------+
-                                          |
-                                          | E2E Encrypted
-                                          |
-+------------------+    WebSocket    +----+-----+
-|  QR Auth Server  |<-- - - - - - ->| Baileys  |
-|  (Python :8765)  |   QR events    | Bridge   |
-|  Auto-refresh    |                | (Node.js)|
-|  web page        |                | Port 3002|
-+------------------+                +----+-----+
-                                         |
-                                    WebSocket
-                                         |
-                              +----------+-----------+
-                              |   WhatsApp Channel   |
-                              |   (whatsapp_channel)  |
-                              | - Deduplication      |
-                              | - fromMe filtering   |
-                              | - Contact filtering  |
-                              | - Rate limiting      |
-                              +----------+-----------+
-                                         |
-                              +----------+-----------+
-                              |   Main Orchestrator  |
-                              |      (main.py)       |
-                              +----------+-----------+
-                                         |
-            +----------------------------+----------------------------+
-            |              |             |             |              |
-    +-------+------+ +----+----+ +------+------+ +----+-----+ +-----+------+
-    | Intelligence | | Memory  | | Media       | | Tool     | | Security   |
-    | Layer        | | System  | | Processor   | | Executor | | Guards     |
-    +-------+------+ +----+----+ +------+------+ +----+-----+ +-----+------+
-    |               |            |              |              |
-    |- Scorer       |- Memory    |- Vision API  |- Image gen   |- Content
-    |- Queue        |  Store     |- PDF extract |- Video gen   |  filter
-    |- Escalation   |- Knowledge |- Whisper     |- PDF/LaTeX   |- Fabrication
-    |- Templates    |  Graph     |  transcribe  |- send_message|  guard
-    |- Contact      |- Context   |- Video key-  |- ask_owner   |- Semantic
-    |  profiles     |  Builder   |  frame       |- web_search  |  guard
-    |- Session mgr  |- Reflection|  extraction  |- Integrations|- Privacy
-    |- Cron service |  Engine    |              |              |  levels
-    |- Health       |            |              |              |
-    |- Quiet hours  |            |              |              |
-    +---------------+            +--------------+--------------+
-```
-
-### Data Flow
-
-```
-Inbound message
-    |
-    v
-[Deduplication] -> [Contact Filter] -> [fromMe Filter]
-    |
-    v
-[Admin Command?] --yes--> [Command Handler] -> [Response]
-    |no
-    v
-[Owner Correction?] --yes--> [Record in Reflection DB] -> [Stop]
-    |no
-    v
-[Score Message] -> [Queue] -> [Audit Log]
-    |
-    v
-[Status Check] -> [Busy/DND?] --yes--> [Auto-reply Template]
-    |no
-    v
-[Escalation Check] -> [Score >= Threshold?] --yes--> [Alert Admin]
-    |
-    v
-[Process Media] -> [Vision/PDF/Audio/Video]
-    |
-    v
-[Build System Prompt] (12 layers + lessons + escalation context)
-    |
-    v
-[Generate AI Response] -> [Tool Calls?] --yes--> [Execute Tools] -> [Final Response]
-    |
-    v
-[Content Filter] -> [Fabrication Guard] -> [Send to Contact]
-    |
-    v
-[Store Sample] -> [Update Session] -> [Check Profile Update]
-    |
-    v
-[Memory Consolidation Trigger?] --yes--> [Consolidate + Self-Reflect]
-```
-
-### Technology Stack
-
-| Component | Technology |
-|-----------|-----------|
-| Bridge | Node.js + Baileys (WhatsApp Web API) |
-| Orchestrator | Python 3.11+ asyncio |
-| LLM | GPT-4.1-mini via AI Gateway (configurable) |
-| Database | SQLite (contacts, audit, escalations, sessions, cron, knowledge graph, reflection) |
-| Media | ffmpeg, pdfplumber, Whisper API (Groq), vision API |
-| PDF | LaTeX compilation via [latex-document skill](https://github.com/ndpvt-web/latex-document-skill) |
-| QR Server | Python HTTP server with auto-refresh |
-| Daemon | Custom Python process supervisor with auto-restart |
+<table>
+<tr>
+<td align="center" width="33%">
+<img src="assets/feature-whatsapp.png" alt="Identity Impersonation" width="180" /><br/>
+<h3>Identity Impersonation</h3>
+<p>Acts AS you, not as a bot. Matches your texting style per contact. Denies being AI even when asked directly. Contacts genuinely think it's you typing.</p>
+</td>
+<td align="center" width="33%">
+<img src="assets/feature-ai-brain.png" alt="AI Intelligence" width="180" /><br/>
+<h3>AI Intelligence Layer</h3>
+<p>15+ specialized modules: message scoring, smart escalation, knowledge graph, session tracking, quiet hours, scheduling, and health monitoring.</p>
+</td>
+<td align="center" width="33%">
+<img src="assets/feature-memory.png" alt="Memory Isolation" width="180" /><br/>
+<h3>Per-Contact Memory</h3>
+<p>Each contact has their own memory silo. What you discuss with Contact A is NEVER visible to Contact B. Privacy by architecture, not just by policy.</p>
+</td>
+</tr>
+<tr>
+<td align="center" width="33%">
+<img src="assets/feature-shield.png" alt="Security" width="180" /><br/>
+<h3>7-Layer Security</h3>
+<p>Content filter blocks credential leaks. Fabrication guard stops fake claims. Semantic guard detects prompt injection. Privacy isolation prevents data leakage.</p>
+</td>
+<td align="center" width="33%">
+<img src="assets/feature-tools.png" alt="Multimodal Tools" width="180" /><br/>
+<h3>Multimodal Tools</h3>
+<p>Generate images, videos, and professional PDFs. Understand photos, voice messages, and documents sent to you. Search the web. Send to any contact.</p>
+</td>
+<td align="center" width="33%">
+<img src="assets/feature-learning.png" alt="Self-Learning" width="180" /><br/>
+<h3>Self-Learning AI</h3>
+<p>Records owner corrections. Stores escalation answers. Runs periodic self-reflection. Builds a lessons database and applies them to future conversations.</p>
+</td>
+</tr>
+</table>
 
 ---
 
-## Quick Start
+## How It Works
+
+### System Architecture
+
+The bot runs as a background daemon connecting your WhatsApp account to an AI processing pipeline:
+
+<p align="center">
+  <img src="assets/diagrams/architecture.png" alt="System Architecture" width="700" />
+</p>
+
+<details>
+<summary><strong>Architecture explained for non-developers</strong></summary>
+
+1. **WhatsApp Cloud** -- Your phone's WhatsApp account in the cloud
+2. **Baileys Bridge** -- A Node.js service that connects to WhatsApp using the same protocol as WhatsApp Web
+3. **QR Server** -- Shows a QR code in your browser for one-time authentication (just like WhatsApp Web)
+4. **WhatsApp Channel** -- Filters duplicate messages, manages rate limits, and routes messages
+5. **Main Orchestrator** -- The brain of the system (2,339 lines) that coordinates everything
+6. **Intelligence Layer** -- Scores message importance, manages escalations, tracks contact profiles
+7. **Memory System** -- Remembers conversations, builds a knowledge graph, learns from mistakes
+8. **Media Processor** -- Understands images, PDFs, voice messages, and videos
+9. **Tool Executor** -- Generates images, videos, PDFs, sends messages, searches the web
+10. **Security Guards** -- Multiple layers preventing credential leaks, fabricated responses, and prompt injection
+
+</details>
+
+### Message Processing Pipeline
+
+Every incoming message passes through this intelligent pipeline before a response is generated:
+
+<p align="center">
+  <img src="assets/diagrams/dataflow.png" alt="Message Processing Pipeline" width="600" />
+</p>
+
+<details>
+<summary><strong>Pipeline explained step by step</strong></summary>
+
+1. **Message arrives** -- Deduplicated and filtered (blocked contacts, rate limits)
+2. **Admin check** -- Slash commands from the admin are handled directly (e.g., `/status`, `/pause`)
+3. **Correction check** -- If the admin manually types in a contact's chat, it's recorded as a correction for learning
+4. **Importance scoring** -- Message gets a 1-10 score based on urgency keywords, question marks, repetition, etc.
+5. **Status check** -- If you're set to busy/DND, sends an auto-reply template instead
+6. **Escalation check** -- High-scoring messages trigger an alert to the admin
+7. **Media processing** -- Images are analyzed by vision AI, voice messages are transcribed, PDFs are extracted
+8. **Prompt assembly** -- A 12-layer system prompt is built with memory, profile, privacy rules, and lessons learned
+9. **AI response** -- The LLM generates a response, potentially using tools (image gen, web search, etc.)
+10. **Security scan** -- Content filter and fabrication guard check the response before sending
+11. **Delivery** -- Response is sent to the contact, sample is stored, session is updated
+
+</details>
+
+### How the AI Builds Its Response
+
+The AI doesn't just reply with a generic answer. It assembles context from 12+ layers to generate a personalized, safe response:
+
+<p align="center">
+  <img src="assets/diagrams/context-layers.png" alt="12-Layer Context Builder" width="600" />
+</p>
+
+<details>
+<summary><strong>What each layer does</strong></summary>
+
+| Layer | Name | What It Does |
+|-------|------|-------------|
+| 1 | **Security Anchor** | Immutable identity block that cannot be overridden by any message |
+| 2 | **SOUL.md** | Editable bot personality file -- defines how the bot behaves |
+| 3 | **USER.md** | Your profile (name, timezone, preferences) |
+| 4 | **Config** | Purpose, tone, and operating mode from your settings |
+| 5 | **Privacy Rules** | Instructions on what information can be shared between contacts |
+| 6 | **Anti-Fabrication** | Rules preventing the AI from making up facts it doesn't know |
+| 7 | **Memory** | Long-term facts about THIS specific contact |
+| 8 | **History** | Recent events and conversation log for this contact |
+| 9 | **Contact Profile** | Auto-generated style profile (tone, emoji usage, language) |
+| 10 | **RAG Context** | Relevant past conversations retrieved from the knowledge graph |
+| 11 | **Integrations** | Instructions for active integrations (spreadsheet, email) |
+| 12 | **Reasoning Suppression** | Forces the AI to strip thinking before sending |
+| +1 | **Learned Lessons** | Corrections and self-reflection insights from past mistakes |
+| +2 | **Escalation Context** | Recent escalation alerts when admin is replying |
+
+</details>
+
+---
+
+## Getting Started
 
 ### Prerequisites
 
-- Node.js 20+
-- Python 3.11+
-- `AI_GATEWAY_API_KEY` environment variable
-- ffmpeg (for video processing)
+| Requirement | Version | Purpose |
+|------------|---------|---------|
+| Python | 3.11+ | Main orchestrator |
+| Node.js | 20+ | WhatsApp bridge |
+| AI_GATEWAY_API_KEY | -- | Environment variable for LLM access |
+| ffmpeg | any | Video/audio processing (optional) |
 
 ### Installation
 
 ```bash
-# Clone the repository
+# 1. Clone the repository
 git clone https://github.com/ndpvt-web/happycapy-whatsapp.git ~/.claude/skills/happycapy-whatsapp
 
-# Run setup (installs Python + Node.js dependencies, compiles bridge)
+# 2. Run setup (installs all dependencies, compiles bridge)
 bash ~/.claude/skills/happycapy-whatsapp/scripts/setup.sh
 
-# Install the latex-document skill for PDF generation (optional but recommended)
+# 3. Install latex-document skill for PDF generation (recommended)
 git clone https://github.com/ndpvt-web/latex-document-skill ~/.claude/skills/latex-document
 ```
 
-### Starting the Bot
+### Start the Bot
 
 ```bash
-# Start as a 24/7 daemon (recommended -- auto-restarts on crash)
+# Start as 24/7 daemon (recommended -- auto-restarts on crash)
 bash ~/.claude/skills/happycapy-whatsapp/scripts/start.sh daemon
-
-# Or start in foreground (for debugging)
-bash ~/.claude/skills/happycapy-whatsapp/scripts/start.sh foreground
 
 # Check status
 bash ~/.claude/skills/happycapy-whatsapp/scripts/start.sh status
 
-# View logs
+# View live logs
 tail -f ~/.happycapy-whatsapp/logs/daemon.log
-
-# Restart
-bash ~/.claude/skills/happycapy-whatsapp/scripts/start.sh restart
-
-# Stop
-bash ~/.claude/skills/happycapy-whatsapp/scripts/start.sh stop
 ```
 
-### Connecting WhatsApp
+### Connect WhatsApp
 
-1. Start the bot (see above)
-2. Open the QR authentication page in your browser (URL shown in logs, typically `http://localhost:8765`)
-3. Open WhatsApp on your phone: **Settings > Linked Devices > Link a Device**
-4. Scan the QR code displayed on the web page
+1. Start the bot
+2. Open the QR page in your browser (URL shown in logs, typically port 8765)
+3. On your phone: **WhatsApp > Settings > Linked Devices > Link a Device**
+4. Scan the QR code
 5. Wait for "WhatsApp connected!" in the logs
 
-The QR page auto-refreshes every 2 seconds and displays a "Connected" status once linked.
+The QR page auto-refreshes every 2 seconds. Once connected, it shows a green "Connected" badge.
 
----
+### Setup Wizard
 
-## Setup Wizard
+On first run, an interactive wizard configures everything:
 
-On first run, the bot launches an interactive setup wizard that configures everything through a natural conversation. The wizard uses intent inference to minimize questions:
+<p align="center">
+  <img src="assets/diagrams/setup-flow.png" alt="Setup Wizard Flow" width="600" />
+</p>
 
-### Phase 1: Intent Gathering
+You describe what you want in natural language. The wizard infers your settings automatically:
 
-You describe your use case in natural language, or pick a preset:
-
-- **Personal assistant** -- Bot replies as you, contacts never know it's AI
-- **Business automation** -- Handle orders, invoices, customer messages
-- **AI assistant bot** -- Transparent AI helper
-- **Monitor messages** -- Silent observation only
-
-### Phase 2: Smart Inference
-
-The wizard extracts config values from your description:
-
-| You say... | Bot infers... |
-|-----------|--------------|
+| What you say | What the bot infers |
+|-------------|-------------------|
 | "monitor my business WhatsApp" | mode: monitor_only, purpose: monitoring_only |
-| "casual tone, reply to everyone" | tone: casual_friendly, allowlist: [] |
-| "+852 92893658" | admin_number: 85292893658 |
+| "casual tone, reply to everyone" | tone: casual_friendly, access: everyone |
+| "+852 92893658 is my number" | admin_number: 85292893658 |
 | "professional support bot" | tone: professional, purpose: business_support |
 
-### Phase 3: Verify Only What's Missing
-
-The wizard only asks follow-up questions for fields it couldn't infer. Most users are fully set up in 1-2 questions.
-
-### Phase 4: Smart Defaults
-
-All unresolved optional fields get safe defaults:
-
-| Field | Default | Rationale |
-|-------|---------|-----------|
-| privacy_level | strict | Never leaks info between contacts |
-| fabrication_policy | strict (impersonate) / deflect (assistant) | Safety first |
-| voice_transcription | true | Most users want this |
-| group_policy | monitor | Never auto-reply in groups |
-| tool_calling_enabled | true | Image/video/PDF generation |
-| escalation_enabled | true | Smart alerts for important messages |
+The wizard only asks follow-up questions for fields it couldn't infer. Most users are fully set up in **1-2 questions**.
 
 ---
 
 ## Admin Commands
 
-Control the bot entirely via WhatsApp by sending slash commands from the admin number:
+Control everything via WhatsApp by sending slash commands from your admin number:
 
-### Bot Control
+<details>
+<summary><strong>Bot Control</strong> -- /status, /pause, /resume, /mode, /tone, /busy, /dnd, /available</summary>
 
 | Command | Description |
 |---------|-------------|
@@ -404,7 +271,10 @@ Control the bot entirely via WhatsApp by sending slash commands from the admin n
 | `/dnd` | Set status to Do Not Disturb |
 | `/available` | Clear status override |
 
-### Contact Management
+</details>
+
+<details>
+<summary><strong>Contact Management</strong> -- /allow, /block, /contacts, /profile</summary>
 
 | Command | Description |
 |---------|-------------|
@@ -415,7 +285,10 @@ Control the bot entirely via WhatsApp by sending slash commands from the admin n
 | `/contacts` | List all known contacts with profiles |
 | `/profile <number>` | View detailed contact card |
 
-### Message Routing
+</details>
+
+<details>
+<summary><strong>Message Routing & Escalation</strong> -- /queue, /escalate, /respond, /delete</summary>
 
 | Command | Description |
 |---------|-------------|
@@ -424,7 +297,10 @@ Control the bot entirely via WhatsApp by sending slash commands from the admin n
 | `/respond ESC-XXX <answer>` | Reply to an escalation (routed back to contact) |
 | `/delete <msg_id>` | Delete a sent message |
 
-### Memory & Knowledge
+</details>
+
+<details>
+<summary><strong>Memory & Knowledge</strong> -- /memory, /memorysearch, /kg</summary>
 
 | Command | Description |
 |---------|-------------|
@@ -436,7 +312,10 @@ Control the bot entirely via WhatsApp by sending slash commands from the admin n
 | `/kg search <query>` | Search the knowledge graph |
 | `/kg extract` | Force knowledge extraction |
 
-### Scheduling
+</details>
+
+<details>
+<summary><strong>Scheduling & Reminders</strong> -- /remind, /cron</summary>
 
 | Command | Description |
 |---------|-------------|
@@ -445,7 +324,10 @@ Control the bot entirely via WhatsApp by sending slash commands from the admin n
 | `/cron del <id>` | Delete a scheduled job |
 | `/cron every <minutes> <message>` | Add a recurring job |
 
-### Groups
+</details>
+
+<details>
+<summary><strong>Groups</strong> -- /groups, /groupsearch, /greply</summary>
 
 | Command | Description |
 |---------|-------------|
@@ -454,7 +336,10 @@ Control the bot entirely via WhatsApp by sending slash commands from the admin n
 | `/grouprecent [group]` | View recent group messages |
 | `/greply <group> <msg>` | Send a message to a group |
 
-### Quiet Hours
+</details>
+
+<details>
+<summary><strong>Quiet Hours</strong> -- /quiet</summary>
 
 | Command | Description |
 |---------|-------------|
@@ -462,7 +347,10 @@ Control the bot entirely via WhatsApp by sending slash commands from the admin n
 | `/quiet on\|off` | Enable/disable quiet hours |
 | `/quiet set <start> <end> <tz>` | Configure (e.g., `/quiet set 23:00 07:00 Asia/Hong_Kong`) |
 
-### Identity & Learning
+</details>
+
+<details>
+<summary><strong>Identity & Learning</strong> -- /identity, /reflect</summary>
 
 | Command | Description |
 |---------|-------------|
@@ -470,207 +358,265 @@ Control the bot entirely via WhatsApp by sending slash commands from the admin n
 | `/reflect` | View reflection engine stats (lessons learned) |
 | `/reflect run` | Force a self-reflection analysis |
 
-### System
+</details>
+
+<details>
+<summary><strong>System & Monitoring</strong> -- /health, /audit, /tools, /session</summary>
 
 | Command | Description |
 |---------|-------------|
-| `/health` | System health (uptime, memory, message rates, connection status) |
+| `/health` | System health (uptime, memory, message rates) |
 | `/heartbeat` | Force maintenance tick now |
 | `/audit` | Show recent audit events |
 | `/session` | Session stats |
-| `/session reset` | Reset session tracking |
-| `/historysync` | History sync stats |
 | `/tools` | Tool calling status |
 | `/tools on\|off` | Enable/disable tool calling |
 | `/template list\|add\|del` | Manage reply templates |
+
+</details>
 
 ---
 
 ## Security
 
-### Defense in Depth
+The bot implements **7 overlapping security layers** -- defense in depth, not just a single wall:
 
-The bot implements multiple overlapping security layers:
+<p align="center">
+  <img src="assets/diagrams/security-layers.png" alt="7-Layer Security Model" width="600" />
+</p>
 
-```
-Layer 0: Security Anchor (immutable system prompt block)
-Layer 1: Content Filter (outbound credential/token scanning)
-Layer 2: Fabrication Guard (blocks fabricated personal claims)
-Layer 3: Semantic Guard (LLM-as-judge prompt injection detection)
-Layer 4: Privacy Isolation (per-contact memory silos)
-Layer 5: Reasoning Suppression (strips AI thinking from responses)
-Layer 6: Bridge Security (localhost-only binding, token auth)
-Layer 7: File Permissions (0o600 config, 0o700 directories)
-```
+<details>
+<summary><strong>What each security layer protects against</strong></summary>
 
-### Outbound Content Filter
+| Layer | Name | Protection |
+|-------|------|-----------|
+| **0** | **Security Anchor** | Immutable identity block in system prompt. Cannot be overridden by messages, tools, or web content. |
+| **1** | **Content Filter** | Scans every outbound message for API keys, bearer tokens, private keys, credit card numbers. Blocks before sending. |
+| **2** | **Fabrication Guard** | Detects when AI fabricates personal claims ("I'm at the gym", "I'll be free at 3pm"). Blocks and replaces with safe deflections. |
+| **3** | **Semantic Guard** | LLM-as-judge classifier detecting 8 attack categories: identity override, instruction override, prompt extraction, privilege escalation, delimiter framing, indirect injection, data exfiltration, safety bypass. |
+| **4** | **Privacy Isolation** | Per-contact hashed memory directories. Contact A's data is physically separated from Contact B's. |
+| **5** | **Reasoning Suppression** | Strips AI thinking/reasoning from responses. Contacts only see the final reply, never internal chain-of-thought. |
+| **6** | **Bridge Security** | WebSocket binds to 127.0.0.1 only. Token authentication between bridge and orchestrator. |
+| **7** | **File Permissions** | Config files: 0o600 (owner read/write only). Directories: 0o700 (owner only). |
 
-Every message is scanned before sending for:
-- API keys (OpenAI, Anthropic, AWS, GitHub, Slack)
+</details>
+
+### Credential Scanning
+
+Every outbound message is checked for:
+
+- API keys (OpenAI `sk-proj-*`, Anthropic `sk-ant-*`, AWS `AKIA*`, GitHub `ghp_*`, Slack `xox*-*`)
 - Bearer tokens and private keys
-- System prompt markers and internal paths
+- System prompt markers and internal file paths
 - Credit card numbers (Luhn-validated)
 - Unicode bypass attempts (NFKD normalization, zero-width character stripping)
 
-### Prompt Injection Defense
+### Privacy Architecture
 
-- **Security Anchor**: Immutable identity block at the top of every system prompt. Cannot be overridden by user messages, tool outputs, or web content.
-- **Semantic Guard**: LLM classifier that detects 8 categories of prompt injection attacks before the message reaches the main AI.
-- **Profile Sanitization**: Contact profiles injected into prompts are truncated to 500 characters to limit injection surface from manipulated conversation data.
+- **Strict mode** (default): Never shares info from one contact with another. Always asks owner for sensitive decisions.
+- **Moderate mode**: Shares general info, protects private details.
+- **Open mode**: Shares freely (only for trusted-contact scenarios).
 
-### Privacy
+---
 
-- Per-contact memory isolation (hashed directories)
-- Three privacy levels (strict/moderate/open)
-- No cross-contact information leakage in strict mode
-- `ask_owner` tool for sensitive information decisions
-- Config file permissions restricted to owner-only (0o600)
-- Bridge binds to 127.0.0.1 only (not externally accessible)
+## What the Bot Can Do
+
+### Media Understanding (Automatic)
+
+The bot automatically processes all media types your contacts send:
+
+| Media Type | What Happens |
+|-----------|-------------|
+| **Photos** | Analyzed by vision AI -- bot can describe images, read text in photos, understand memes |
+| **PDFs** | Text extracted and included in conversation context |
+| **Voice Messages** | Transcribed to text via Whisper AI (Groq) |
+| **Videos** | Keyframe extracted for vision + audio transcribed |
+| **Stickers** | Analyzed by vision AI like photos |
+| **Documents** | PDF extraction for supported formats; metadata for others |
+
+### Tool Calling (On Demand)
+
+The bot can use AI tools during conversations:
+
+| Tool | What It Does | Example Trigger |
+|------|-------------|----------------|
+| **Image Generation** | Creates AI images from descriptions | "can you make me a logo for my cafe?" |
+| **Video Generation** | Creates 6-10 second AI videos | "make a short video of a sunset" |
+| **PDF Creation** | Compiles professional LaTeX documents | "create a resume for me" |
+| **Send Message** | Sends text/media to other contacts | "tell John I'll be late" |
+| **Ask Owner** | Escalates questions to the admin | automatic when bot doesn't know something |
+| **Web Search** | Searches the web for current info | "what's the weather in Hong Kong?" |
+
+### Pluggable Integrations
+
+| Integration | What It Does |
+|------------|-------------|
+| **Spreadsheet** | Log orders, expenses, and data to Excel files via conversation |
+| **Email** | Send emails through the bot |
+
+Adding a new integration = one Python file implementing the `BaseIntegration` interface.
 
 ---
 
 ## Configuration
 
-All configuration is stored at `~/.happycapy-whatsapp/config.json`. Every field has a sensible default and can be overridden via environment variables.
+All settings live in `~/.happycapy-whatsapp/config.json`. Every field has a sensible default.
 
-### Core Settings
+<details>
+<summary><strong>Core Settings</strong></summary>
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `purpose` | string | `personal_assistant` | Bot purpose: `personal_assistant`, `business_support`, `team_coordination`, `monitoring_only` |
-| `tone` | string | `casual_friendly` | Response tone: `casual_friendly`, `professional`, `concise_direct`, `warm_empathetic`, `custom` |
-| `mode` | string | `auto_reply` | Operating mode: `auto_reply`, `ask_before_reply`, `monitor_only` |
-| `admin_number` | string | `""` | Admin phone number (digits only) for remote control |
-| `personality_mode` | string | `impersonate` | `impersonate` (act as owner) or `assistant` (transparent AI) |
-| `owner_name` | string | `""` | Owner's name for natural responses |
+| Setting | Default | Options |
+|---------|---------|---------|
+| `purpose` | `personal_assistant` | `personal_assistant`, `business_support`, `team_coordination`, `monitoring_only` |
+| `tone` | `casual_friendly` | `casual_friendly`, `professional`, `concise_direct`, `warm_empathetic`, `custom` |
+| `mode` | `auto_reply` | `auto_reply`, `ask_before_reply`, `monitor_only` |
+| `personality_mode` | `impersonate` | `impersonate` (act as owner) or `assistant` (transparent AI) |
+| `admin_number` | `""` | Your phone number (digits only) |
+| `owner_name` | `""` | Your name for natural responses |
 
-### Contact Filtering
+</details>
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `allowlist` | array | `[]` | Phone numbers to respond to (empty = everyone) |
-| `blocklist` | array | `[]` | Phone numbers to ignore |
+<details>
+<summary><strong>Privacy & Safety</strong></summary>
 
-### Privacy & Safety
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `privacy_level` | `strict` | `strict` (never share cross-contact), `moderate`, `open` |
+| `fabrication_policy` | `strict` | `strict` (ask owner), `deflect` (say "lemme check"), `relaxed` (best effort) |
+| `allowlist` | `[]` | Phone numbers to respond to (empty = everyone) |
+| `blocklist` | `[]` | Phone numbers to ignore |
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `privacy_level` | string | `strict` | `strict`, `moderate`, or `open` |
-| `fabrication_policy` | string | `strict` | `strict` (ask owner), `deflect`, `relaxed` |
+</details>
 
-### Media & Voice
+<details>
+<summary><strong>Intelligence</strong></summary>
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `voice_transcription` | boolean | `false` | Enable voice-to-text via Whisper |
-| `voice_transcription_provider` | string | `groq` | Transcription provider |
-| `media_handling` | string | `acknowledge` | How to handle media types |
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `escalation_enabled` | `true` | Enable smart escalation to admin |
+| `importance_threshold` | `7` | Messages scoring >= this trigger admin alerts (1-10 scale) |
+| `tool_calling_enabled` | `true` | Allow AI to generate images, videos, PDFs |
+| `voice_transcription` | `false` | Transcribe voice messages to text |
+| `group_policy` | `monitor` | `monitor` (log only) or `ignore` |
+| `group_keywords` | `[]` | Keywords that trigger group alerts |
 
-### Intelligence
+</details>
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `escalation_enabled` | boolean | `true` | Enable the escalation engine |
-| `importance_threshold` | integer | `7` | Score >= this triggers admin alert (1-10) |
-| `alert_on_auto_reply` | boolean | `false` | Alert admin on every auto-reply |
-| `tool_calling_enabled` | boolean | `true` | Enable LLM tool calling (image/video/PDF gen) |
-| `group_policy` | string | `monitor` | `monitor` (log only) or `ignore` |
-| `group_keywords` | array | `[]` | Keywords that trigger group alerts |
+<details>
+<summary><strong>Quiet Hours</strong></summary>
 
-### Quiet Hours
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `quiet_hours_enabled` | `false` | Enable timezone-aware quiet hours |
+| `quiet_hours_start` | `23:00` | Start time (HH:MM) |
+| `quiet_hours_end` | `07:00` | End time (HH:MM) |
+| `quiet_hours_timezone` | `UTC` | Your timezone (e.g., `Asia/Hong_Kong`) |
+| `quiet_hours_override_threshold` | `9` | Urgent messages scoring >= this bypass quiet hours |
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `quiet_hours_enabled` | boolean | `false` | Enable quiet hours |
-| `quiet_hours_start` | string | `23:00` | Start time (HH:MM) |
-| `quiet_hours_end` | string | `07:00` | End time (HH:MM) |
-| `quiet_hours_timezone` | string | `UTC` | Timezone (e.g., `Asia/Hong_Kong`) |
-| `quiet_hours_override_threshold` | integer | `9` | Score >= this bypasses quiet hours |
+</details>
 
-### Integrations
+<details>
+<summary><strong>Technical</strong></summary>
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `enabled_integrations` | array | `["core"]` | Active integrations: `core`, `spreadsheet`, `email` |
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `ai_model` | `gpt-4.1-mini` | LLM model for responses |
+| `bridge_port` | `3002` | WhatsApp bridge port |
+| `qr_server_port` | `8765` | QR authentication page port |
+| `max_message_length` | `4000` | Max outbound message length |
+| `rate_limit_per_minute` | `30` | Rate limit cap |
 
-### Technical
+</details>
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `ai_gateway_url` | string | AI Gateway URL | LLM API endpoint |
-| `ai_model` | string | `gpt-4.1-mini` | LLM model for responses |
-| `profile_model` | string | `gpt-4.1-mini` | LLM model for profile/memory tasks |
-| `bridge_port` | integer | `3002` | Baileys bridge WebSocket port |
-| `qr_server_port` | integer | `8765` | QR authentication server port |
-| `max_message_length` | integer | `4000` | Max outbound message length |
-| `rate_limit_per_minute` | integer | `30` | Rate limit cap |
-| `media_max_age_hours` | integer | `24` | Auto-cleanup media files after this |
+<details>
+<summary><strong>Environment Variable Overrides</strong></summary>
 
-### Environment Variable Overrides
-
-| Environment Variable | Config Field |
-|---------------------|-------------|
-| `WHATSAPP_BRIDGE_PORT` | `bridge_port` |
-| `WHATSAPP_QR_PORT` | `qr_server_port` |
-| `WHATSAPP_AUTH_DIR` | `auth_dir` |
-| `WHATSAPP_BRIDGE_TOKEN` | `bridge_token` |
-| `WHATSAPP_MODE` | `mode` |
-| `WHATSAPP_ADMIN_NUMBER` | `admin_number` |
+| Env Variable | Config Field |
+|-------------|-------------|
+| `AI_GATEWAY_API_KEY` | Required -- LLM API key |
 | `AI_GATEWAY_URL` | `ai_gateway_url` |
 | `AI_MODEL` | `ai_model` |
+| `WHATSAPP_ADMIN_NUMBER` | `admin_number` |
+| `WHATSAPP_MODE` | `mode` |
+| `WHATSAPP_BRIDGE_PORT` | `bridge_port` |
+| `WHATSAPP_QR_PORT` | `qr_server_port` |
+
+</details>
 
 ---
 
 ## Identity Files
 
-The bot's personality is defined by two editable Markdown files in `~/.happycapy-whatsapp/identity/`:
+The bot's personality is defined by two **editable Markdown files** you can customize:
 
-### SOUL.md
+| File | Location | Purpose |
+|------|----------|---------|
+| **SOUL.md** | `~/.happycapy-whatsapp/identity/SOUL.md` | Core personality, communication rules, behavioral constraints |
+| **USER.md** | `~/.happycapy-whatsapp/identity/USER.md` | Your name, timezone, language, preferences, custom instructions |
 
-Defines the bot's core personality, communication rules, and behavioral constraints. Two templates are provided:
+Both files are loaded fresh on every message, so changes take effect **instantly without restart**.
 
-- **Impersonate mode**: "You ARE the owner of this phone. Every message you send goes directly to a real contact as if the owner typed it. NEVER reveal you are AI."
-- **Assistant mode**: "I am a personal AI assistant on WhatsApp, helping manage messages for the phone owner."
+### Personality Modes
 
-### USER.md
-
-Contains the owner's profile information: name, timezone, language, preferences, and custom instructions. Edit this to give the bot context about who you are.
-
-Both files are loaded fresh on every prompt build, so changes take effect without restart.
+| Mode | SOUL.md Template | Behavior |
+|------|-----------------|----------|
+| **Impersonate** (default) | "You ARE the owner of this phone. NEVER reveal you are AI." | Bot acts as you. Denies being AI. Asks you when unsure. |
+| **Assistant** | "I am a personal AI assistant helping manage messages." | Bot is transparent about being AI. Professional helper. |
 
 ---
 
 ## Daemon Mode
 
-The daemon provides 24/7 operation with process supervision:
+The bot runs 24/7 as a supervised background process:
 
-| Feature | Detail |
-|---------|--------|
-| Auto-restart | Exponential backoff: 3s to 120s between restarts |
-| PID tracking | `~/.happycapy-whatsapp/daemon.pid` |
-| Log rotation | At 10MB with one backup file |
-| Graceful shutdown | Via SIGTERM signal |
-| Stability detection | Backoff resets after 5 minutes of stable operation |
-| Max restarts | 50 attempts before giving up |
+| Feature | Details |
+|---------|---------|
+| **Auto-restart** | Exponential backoff: 3s to 120s between restarts |
+| **Log rotation** | At 10MB with one backup file |
+| **Graceful shutdown** | Via SIGTERM signal |
+| **Stability detection** | Backoff resets after 5 minutes of stable operation |
+| **Max restarts** | 50 attempts before giving up |
 
-Logs are written to `~/.happycapy-whatsapp/logs/daemon.log`.
+```bash
+# Daemon management
+bash scripts/start.sh daemon     # Start
+bash scripts/start.sh stop       # Stop
+bash scripts/start.sh restart    # Restart
+bash scripts/start.sh status     # Check status
+```
 
 ---
 
-## File Structure
+## Technology Stack
+
+| Component | Technology | Lines |
+|-----------|-----------|-------|
+| **Orchestrator** | Python 3.11+ asyncio | 2,339 |
+| **WhatsApp Bridge** | Node.js + Baileys | -- |
+| **LLM** | GPT-4.1-mini via AI Gateway | -- |
+| **Database** | SQLite (contacts, audit, escalations, sessions, cron, KG, reflection) | -- |
+| **Media** | ffmpeg, pdfplumber, Whisper API (Groq), vision API | -- |
+| **PDF Engine** | LaTeX via [latex-document skill](https://github.com/ndpvt-web/latex-document-skill) | -- |
+| **QR Auth** | Python HTTP server with auto-refresh | -- |
+| **Daemon** | Custom Python process supervisor | -- |
+| **Total** | **32 Python modules** | **11,072** |
+
+---
+
+## Project Structure
+
+<details>
+<summary><strong>Click to expand full file tree</strong></summary>
 
 ```
 ~/.claude/skills/happycapy-whatsapp/
 |-- README.md                    # This file
 |-- SKILL.md                     # Claude Code skill definition
+|-- assets/                      # Images and diagrams for docs
 |-- bridge/                      # Node.js WhatsApp bridge (Baileys)
-|   |-- src/                     # TypeScript source
-|   |-- dist/                    # Compiled JavaScript
-|   `-- package.json
 |-- scripts/
 |   |-- setup.sh                 # First-time installation
-|   |-- start.sh                 # Daemon management
-|   `-- compile_pdf.sh           # LaTeX compilation helper
+|   `-- start.sh                 # Daemon management
 |-- src/
 |   |-- main.py                  # Main orchestrator (2,339 lines)
 |   |-- whatsapp_channel.py      # Bridge communication layer
@@ -700,99 +646,50 @@ Logs are written to `~/.happycapy-whatsapp/logs/daemon.log`.
 |   |-- daemon.py                # Process supervisor
 |   |-- send_file.py             # CLI utility for sending files
 |   `-- integrations/
-|       |-- __init__.py           # Integration registry + loader
+|       |-- __init__.py           # Integration registry
 |       |-- base.py               # Abstract base class
 |       |-- spreadsheet.py        # Excel/spreadsheet tracking
-|       `-- email.py              # Email sending integration
+|       `-- email.py              # Email sending
 
-~/.happycapy-whatsapp/           # Runtime data directory
+~/.happycapy-whatsapp/           # Runtime data
 |-- config.json                  # Bot configuration
-|-- contacts.db                  # SQLite: profiles, samples, KG, audit
+|-- contacts.db                  # SQLite: profiles, samples, KG
 |-- reflection.db                # SQLite: lessons learned
 |-- whatsapp-auth/               # WhatsApp session credentials
 |-- identity/
 |   |-- SOUL.md                  # Bot personality
 |   `-- USER.md                  # Owner profile
 |-- memory/
-|   |-- MEMORY.md                # Global memory (legacy)
-|   |-- HISTORY.md               # Global history (legacy)
 |   `-- contacts/                # Per-contact isolated memory
-|       |-- {hash}/MEMORY.md
-|       `-- {hash}/HISTORY.md
-|-- media/                       # Generated and received media files
+|-- media/                       # Generated/received media
 |-- logs/
-|   `-- daemon.log               # Process logs with rotation
-`-- daemon.pid                   # Daemon PID file
+|   `-- daemon.log               # Process logs
+`-- daemon.pid
 ```
 
----
-
-## Sending Files Programmatically
-
-Use the CLI utility to send files to any WhatsApp contact:
-
-```bash
-cd ~/.claude/skills/happycapy-whatsapp
-
-# Send a file (image, PDF, video, audio, document)
-python -m src.send_file --to 1234567890 --file /path/to/file.pdf
-
-# Send with caption
-python -m src.send_file --to 1234567890 --file photo.jpg --caption "Here you go"
-
-# Send text only
-python -m src.send_file --to 1234567890 --text "Hello from the agent!"
-```
-
-The `--to` parameter accepts phone numbers (digits only) or full JIDs (`number@s.whatsapp.net`).
-
----
-
-## Codebase Stats
-
-| Metric | Value |
-|--------|-------|
-| Python source files | 32 |
-| Total Python lines | 11,072 |
-| Main orchestrator | 2,339 lines |
-| Intelligence modules | 15+ |
-| Admin commands | 30+ |
-| LLM tools | 6 |
-| Security layers | 7 |
-| Context prompt layers | 12+ |
-| SQLite databases | 2 |
+</details>
 
 ---
 
 ## Dependencies
 
-### Python
-
-- `httpx` -- Async HTTP client for API calls
-- `pdfplumber` -- PDF text extraction
-- `qrcode` -- QR code generation
-- `Pillow` -- Image processing
-- `reportlab` -- Fallback PDF generation
-
-### Node.js
-
-- `@whiskeysockets/baileys` -- WhatsApp Web API
-- `ws` -- WebSocket server
-- `qrcode-terminal` -- Terminal QR display (development)
-
-### System
-
-- `ffmpeg` -- Video/audio processing
-- `pdflatex` / `xelatex` / `lualatex` -- LaTeX compilation (via latex-document skill)
-
----
-
-## License
-
-This project is proprietary software. All rights reserved.
+| Category | Package | Purpose |
+|----------|---------|---------|
+| **Python** | httpx | Async HTTP client |
+| | pdfplumber | PDF text extraction |
+| | qrcode + Pillow | QR code generation |
+| | reportlab | Fallback PDF generation |
+| **Node.js** | @whiskeysockets/baileys | WhatsApp Web API |
+| | ws | WebSocket server |
+| **System** | ffmpeg | Video/audio processing |
+| | pdflatex/xelatex | LaTeX compilation |
 
 ---
 
 <p align="center">
-  Built with the <a href="https://github.com/ndpvt-web/happycapy-whatsapp">HappyCapy</a> platform
+  <br/>
+  <strong>Built with the HappyCapy platform</strong>
+  <br/><br/>
+  <a href="https://github.com/ndpvt-web/happycapy-whatsapp">GitHub</a>
+  <br/>
 </p>
