@@ -122,6 +122,32 @@ SETUP_QUESTIONS = [
         ],
     },
     {
+        "id": "privacy_level",
+        "question": "How should the bot handle private information between contacts?",
+        "header": "Privacy",
+        "options": [
+            {"label": "Strict (Recommended)", "value": "strict",
+             "description": "Never share info from one contact with another. Ask owner if unsure about sharing anything."},
+            {"label": "Moderate", "value": "moderate",
+             "description": "Share general info but protect private details (finances, health, relationships)."},
+            {"label": "Open", "value": "open",
+             "description": "Share freely across contacts (use only if all contacts are trusted)."},
+        ],
+    },
+    {
+        "id": "fabrication_policy",
+        "question": "What should the bot do when it doesn't know something?",
+        "header": "Unknown Info",
+        "options": [
+            {"label": "Ask owner (Recommended)", "value": "strict",
+             "description": "Never guess or make up details. Always ask the owner for unknown info."},
+            {"label": "Deflect casually", "value": "deflect",
+             "description": "Deflect with 'lemme check' or 'I'll get back to you' without asking owner."},
+            {"label": "Best effort", "value": "relaxed",
+             "description": "Try to answer from context, only ask owner for clearly unknown specifics."},
+        ],
+    },
+    {
         "id": "tone",
         "question": "What tone should be used when replying?",
         "header": "Tone",
@@ -206,6 +232,8 @@ def map_answers_to_config(answers: dict[str, str]) -> dict:
 
     config["purpose"] = answers.get("purpose", "personal_assistant")
     config["personality_mode"] = answers.get("personality_mode", "impersonate")
+    config["privacy_level"] = answers.get("privacy_level", "strict")
+    config["fabrication_policy"] = answers.get("fabrication_policy", "strict")
     config["tone"] = answers.get("tone", "casual_friendly")
     config["mode"] = answers.get("mode", "auto_reply")
     config["group_policy"] = answers.get("group_policy", "monitor")
@@ -693,8 +721,8 @@ class WhatsAppOrchestrator:
         rag_context = ""
 
         if self.memory:
-            memory_ctx = self.memory.get_memory_context() or ""
-            recent_history = self.memory.get_recent_history(max_entries=5, max_chars=2000) or ""
+            memory_ctx = self.memory.get_memory_context(jid=sender_id) or ""
+            recent_history = self.memory.get_recent_history(jid=sender_id, max_entries=5, max_chars=2000) or ""
 
         if self.contact_store:
             profile_context = self.contact_store.format_profile_for_prompt(sender_id) or ""
@@ -865,27 +893,36 @@ class WhatsAppOrchestrator:
             asyncio.create_task(self._consolidate_memory())
 
     async def _consolidate_memory(self) -> None:
-        """Background task: consolidate recent conversation samples into MEMORY.md + HISTORY.md."""
+        """Background task: consolidate per-contact memory (isolated).
+
+        Memory isolation: each contact's conversation samples are consolidated
+        into their own MEMORY.md and HISTORY.md files. Contact A's memory
+        is NEVER visible to Contact B.
+        """
         if not self.memory or not self.contact_store:
             return
         try:
             self._message_count_since_consolidation = 0
-            # Gather recent samples from all contacts (unconsolidated)
-            samples = self.contact_store.get_recent_samples_all(
-                limit=self._CONSOLIDATION_THRESHOLD,
-            )
-            if not samples:
-                return
-
             api_key = os.environ.get("AI_GATEWAY_API_KEY", "")
             api_url = self.config.get("ai_gateway_url", "https://ai-gateway.happycapy.ai/api/v1/openai/v1")
             model = self.config.get("profile_model", "gpt-4.1-mini")
 
-            result = await self.memory.consolidate(samples, api_url, api_key, model)
-            if result["success"]:
-                print(f"[memory] Consolidated {result['messages_consolidated']} messages")
-            else:
-                print(f"[memory] Consolidation failed: {result.get('error', '?')}")
+            # Get contacts with enough samples for consolidation
+            active_contacts = self.contact_store.get_active_jids(min_samples=3)
+            total = 0
+            for jid, name in active_contacts:
+                samples = self.contact_store.get_recent_samples(jid, limit=self._CONSOLIDATION_THRESHOLD)
+                if not samples:
+                    continue
+                result = await self.memory.consolidate_contact(
+                    jid, name, samples, api_url, api_key, model
+                )
+                if result["success"]:
+                    total += result["messages_consolidated"]
+                else:
+                    print(f"[memory] Consolidation failed for {name}: {result.get('error', '?')}")
+            if total:
+                print(f"[memory] Consolidated {total} messages across {len(active_contacts)} contacts")
         except Exception as e:
             print(f"[memory] Consolidation error: {e}")
 

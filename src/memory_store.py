@@ -1,17 +1,23 @@
 """Two-layer memory system for HappyCapy WhatsApp skill.
 
 Architecture (ported from nanobot):
-- MEMORY.md: Long-term facts, preferences, relationships. Always loaded into system prompt.
-- HISTORY.md: Append-only timestamped event log. Searchable but NOT in prompt.
+- Per-contact MEMORY.md: Long-term facts about THIS contact only. Injected into prompt.
+- Per-contact HISTORY.md: Append-only timestamped event log per contact.
+- Global MEMORY.md/HISTORY.md: Legacy fallback, used by admin commands only.
 
-Consolidation: LLM periodically summarizes old conversation samples into
-MEMORY.md (facts) + HISTORY.md (events). Runs in background, non-blocking.
+Memory Isolation: Each contact has their own memory directory under
+memory/contacts/{jid_hash}/. Contact A's memory is NEVER shown to Contact B.
+This prevents cross-contact information leakage.
+
+Consolidation: LLM periodically summarizes conversation samples into
+per-contact MEMORY.md (facts) + HISTORY.md (events). Runs in background.
 
 Memory Search: Keyword + date-range + topic search over HISTORY.md with
 fuzzy matching and recency scoring.
 """
 
 import asyncio
+import hashlib
 import os
 import re
 from datetime import datetime, timedelta
@@ -20,22 +26,39 @@ from typing import Any
 
 
 class MemoryStore:
-    """Persistent two-layer memory with LLM consolidation."""
+    """Persistent two-layer memory with LLM consolidation and per-contact isolation."""
 
     def __init__(self, base_dir: str | Path | None = None):
         if base_dir is None:
             base_dir = Path.home() / ".happycapy-whatsapp"
         self._dir = Path(base_dir) / "memory"
         self._dir.mkdir(parents=True, exist_ok=True)
+        # Global files (legacy, admin-only)
         self._memory_path = self._dir / "MEMORY.md"
         self._history_path = self._dir / "HISTORY.md"
+        # Per-contact isolation directory
+        self._contacts_dir = self._dir / "contacts"
+        self._contacts_dir.mkdir(parents=True, exist_ok=True)
         self._consolidation_lock = asyncio.Lock()
         self._last_consolidated_count = 0
 
-    # ── Reading ──
+    # ── JID helpers ──
+
+    @staticmethod
+    def _jid_key(jid: str) -> str:
+        """Convert JID to filesystem-safe directory name (12-char hash)."""
+        return hashlib.md5(jid.encode()).hexdigest()[:12]
+
+    def _contact_dir(self, jid: str) -> Path:
+        """Get/create per-contact memory directory."""
+        d = self._contacts_dir / self._jid_key(jid)
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    # ── Global reading (legacy, admin-only) ──
 
     def read_long_term(self) -> str:
-        """Read MEMORY.md content."""
+        """Read global MEMORY.md content (admin/legacy use only)."""
         if self._memory_path.exists():
             try:
                 return self._memory_path.read_text(encoding="utf-8").strip()
@@ -44,7 +67,7 @@ class MemoryStore:
         return ""
 
     def read_history(self) -> str:
-        """Read HISTORY.md content."""
+        """Read global HISTORY.md content (admin/legacy use only)."""
         if self._history_path.exists():
             try:
                 return self._history_path.read_text(encoding="utf-8").strip()
@@ -52,35 +75,84 @@ class MemoryStore:
                 return ""
         return ""
 
-    # ── Writing ──
+    # ── Global writing (legacy) ──
 
     def write_long_term(self, content: str) -> None:
-        """Overwrite MEMORY.md with new content."""
+        """Overwrite global MEMORY.md with new content."""
         self._memory_path.write_text(content.strip() + "\n", encoding="utf-8")
 
     def append_history(self, entry: str) -> None:
-        """Append a timestamped entry to HISTORY.md."""
+        """Append a timestamped entry to global HISTORY.md."""
         entry = entry.strip()
         if not entry:
             return
         with open(self._history_path, "a", encoding="utf-8") as f:
             f.write(f"\n\n{entry}\n")
 
-    # ── Context injection ──
+    # ── Per-contact reading ──
 
-    def get_memory_context(self) -> str:
-        """Get MEMORY.md content formatted for system prompt injection."""
-        content = self.read_long_term()
+    def read_contact_memory(self, jid: str) -> str:
+        """Read per-contact MEMORY.md content."""
+        path = self._contact_dir(jid) / "MEMORY.md"
+        if path.exists():
+            try:
+                return path.read_text(encoding="utf-8").strip()
+            except OSError:
+                return ""
+        return ""
+
+    def read_contact_history(self, jid: str) -> str:
+        """Read per-contact HISTORY.md content."""
+        path = self._contact_dir(jid) / "HISTORY.md"
+        if path.exists():
+            try:
+                return path.read_text(encoding="utf-8").strip()
+            except OSError:
+                return ""
+        return ""
+
+    # ── Per-contact writing ──
+
+    def write_contact_memory(self, jid: str, content: str) -> None:
+        """Overwrite per-contact MEMORY.md with new content."""
+        path = self._contact_dir(jid) / "MEMORY.md"
+        path.write_text(content.strip() + "\n", encoding="utf-8")
+
+    def append_contact_history(self, jid: str, entry: str) -> None:
+        """Append a timestamped entry to per-contact HISTORY.md."""
+        entry = entry.strip()
+        if not entry:
+            return
+        path = self._contact_dir(jid) / "HISTORY.md"
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"\n\n{entry}\n")
+
+    # ── Context injection (per-contact isolated) ──
+
+    def get_memory_context(self, jid: str | None = None) -> str:
+        """Get MEMORY.md content for system prompt.
+
+        When jid is provided, returns ONLY that contact's isolated memory.
+        Falls back to global memory if no jid given (legacy/admin).
+        """
+        if jid:
+            content = self.read_contact_memory(jid)
+        else:
+            content = self.read_long_term()
         if content:
             return f"## Long-term Memory\n{content}"
         return ""
 
-    def get_recent_history(self, max_entries: int = 5, max_chars: int = 2000) -> str:
+    def get_recent_history(self, jid: str | None = None, max_entries: int = 5, max_chars: int = 2000) -> str:
         """Get recent HISTORY.md entries for prompt injection.
 
-        Returns last N entries, capped at max_chars.
+        When jid is provided, returns ONLY that contact's isolated history.
+        Falls back to global history if no jid given (legacy/admin).
         """
-        raw = self.read_history()
+        if jid:
+            raw = self.read_contact_history(jid)
+        else:
+            raw = self.read_history()
         if not raw:
             return ""
         # Split on double-newline (entries separated by blank lines)
@@ -97,8 +169,137 @@ class MemoryStore:
                 text = text[idx + 2:]
         return text
 
-    # ── Consolidation ──
+    # ── Consolidation (per-contact) ──
 
+    async def consolidate_contact(
+        self,
+        jid: str,
+        contact_name: str,
+        samples: list[dict[str, str]],
+        api_url: str,
+        api_key: str,
+        model: str = "gpt-4.1-mini",
+    ) -> dict[str, Any]:
+        """Consolidate conversation samples for a SPECIFIC contact.
+
+        Memory isolation: each contact's memory is stored separately.
+        Contact A's facts never leak into Contact B's prompt.
+
+        Args:
+            jid: Contact JID (used for per-contact file storage).
+            contact_name: Human-readable name for the consolidation prompt.
+            samples: List of {"role": ..., "content": ..., "timestamp": ...}
+            api_url: AI Gateway URL.
+            api_key: API key.
+            model: Model to use for consolidation.
+        """
+        if not samples:
+            return {"success": True, "messages_consolidated": 0, "error": None}
+
+        async with self._consolidation_lock:
+            return await self._do_consolidate_contact(
+                jid, contact_name, samples, api_url, api_key, model
+            )
+
+    async def _do_consolidate_contact(
+        self, jid, contact_name, samples, api_url, api_key, model
+    ) -> dict[str, Any]:
+        try:
+            import httpx
+        except ImportError:
+            return {"success": False, "messages_consolidated": 0,
+                    "error": "httpx not installed"}
+
+        current_memory = self.read_contact_memory(jid)
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+        # Format conversation for LLM
+        convo_lines = []
+        for s in samples:
+            ts = s.get("timestamp", "?")
+            role = s.get("role", "user").upper()
+            content = s.get("content", "")[:500]
+            convo_lines.append(f"[{ts}] {role}: {content}")
+        conversation_text = "\n".join(convo_lines)
+
+        system_prompt = (
+            "You are a memory consolidation agent. You process conversation history "
+            f"with a SPECIFIC contact ({contact_name}) and extract information.\n\n"
+            "IMPORTANT: This memory is PRIVATE to this contact. Only store facts "
+            "relevant to this specific person and your conversations with them.\n\n"
+            "Produce two outputs:\n\n"
+            "1. **history_entry**: A concise paragraph summarizing the conversation. "
+            f"Start with [{now}] timestamp. Focus on what happened, decisions made, "
+            "topics discussed, and action items.\n\n"
+            "2. **memory_update**: The complete updated MEMORY.md for this contact. "
+            "Include: relationship details, their preferences, topics discussed, "
+            "context you'd need for future conversations. Merge new info with "
+            "existing memory. Remove outdated facts. Use markdown headers.\n\n"
+            "Respond with a JSON object: {\"history_entry\": \"...\", \"memory_update\": \"...\"}\n"
+            "ONLY output the JSON object, nothing else."
+        )
+
+        user_prompt = f"## Contact: {contact_name}\n"
+        user_prompt += f"## Current Memory for this contact\n{current_memory or '(empty)'}\n\n"
+        user_prompt += f"## Recent conversation to process\n{conversation_text}"
+
+        url = api_url.rstrip("/")
+        if not url.endswith("/chat/completions"):
+            url += "/chat/completions"
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    url,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        "temperature": 0.3,
+                        "max_tokens": 2000,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+            reply = data["choices"][0]["message"]["content"].strip()
+            if reply.startswith("```"):
+                reply = re.sub(r"^```(?:json)?\s*", "", reply)
+                reply = re.sub(r"\s*```$", "", reply)
+
+            import json
+            result = json.loads(reply)
+            history_entry = result.get("history_entry", "")
+            memory_update = result.get("memory_update", "")
+
+            if history_entry:
+                self.append_contact_history(jid, history_entry)
+                # Also append to global history for admin visibility
+                self.append_history(f"[{contact_name}] {history_entry}")
+            if memory_update and memory_update.strip() != current_memory.strip():
+                self.write_contact_memory(jid, memory_update)
+
+            self._last_consolidated_count += len(samples)
+            return {
+                "success": True,
+                "messages_consolidated": len(samples),
+                "error": None,
+            }
+
+        except Exception as e:
+            return {
+                "success": False,
+                "messages_consolidated": 0,
+                "error": str(e),
+            }
+
+    # Legacy global consolidation (kept for backward compat, used by admin)
     async def consolidate(
         self,
         samples: list[dict[str, str]],
@@ -106,20 +307,9 @@ class MemoryStore:
         api_key: str,
         model: str = "gpt-4.1-mini",
     ) -> dict[str, Any]:
-        """Consolidate conversation samples into memory layers.
-
-        Args:
-            samples: List of {"role": "user"|"assistant", "content": str, "timestamp": str}
-            api_url: AI Gateway URL
-            api_key: API key
-            model: Model to use for consolidation
-
-        Returns:
-            {"success": bool, "messages_consolidated": int, "error": str|None}
-        """
+        """Legacy global consolidation (for admin/backward compat only)."""
         if not samples:
             return {"success": True, "messages_consolidated": 0, "error": None}
-
         async with self._consolidation_lock:
             return await self._do_consolidate(samples, api_url, api_key, model)
 
@@ -135,12 +325,11 @@ class MemoryStore:
         current_memory = self.read_long_term()
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
-        # Format conversation for LLM
         convo_lines = []
         for s in samples:
             ts = s.get("timestamp", "?")
             role = s.get("role", "user").upper()
-            content = s.get("content", "")[:500]  # Truncate for consolidation
+            content = s.get("content", "")[:500]
             convo_lines.append(f"[{ts}] {role}: {content}")
         conversation_text = "\n".join(convo_lines)
 
@@ -187,7 +376,6 @@ class MemoryStore:
                 data = resp.json()
 
             reply = data["choices"][0]["message"]["content"].strip()
-            # Parse JSON from response (handle markdown code blocks)
             if reply.startswith("```"):
                 reply = re.sub(r"^```(?:json)?\s*", "", reply)
                 reply = re.sub(r"\s*```$", "", reply)

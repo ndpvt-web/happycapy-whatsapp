@@ -167,6 +167,24 @@ class ContactStore:
             for r in reversed(rows)
         ]
 
+    def get_active_jids(self, min_samples: int = 3) -> list[tuple[str, str]]:
+        """Get JIDs with recent conversation samples for per-contact consolidation.
+
+        Returns list of (jid, display_name) tuples for contacts with at least
+        min_samples conversation samples.
+        """
+        rows = self._conn.execute(
+            """SELECT cs.jid, COALESCE(cp.display_name, cs.jid) as name,
+                      COUNT(*) as cnt
+               FROM conversation_samples cs
+               LEFT JOIN contact_profiles cp ON cs.jid = cp.jid
+               GROUP BY cs.jid
+               HAVING cnt >= ?
+               ORDER BY MAX(cs.timestamp) DESC""",
+            (min_samples,),
+        ).fetchall()
+        return [(r["jid"], r["name"]) for r in rows]
+
     def get_profile(self, jid: str) -> ContactProfile | None:
         """Get a contact's profile.
 

@@ -189,6 +189,65 @@ class ContextBuilder:
 
         return " ".join(parts)
 
+    def _build_privacy_instructions(self, config: dict[str, Any]) -> str:
+        """Build privacy instructions based on config privacy_level."""
+        level = config.get("privacy_level", "strict")
+
+        if level == "strict":
+            return (
+                "## Privacy Rules (STRICT)\n"
+                "- NEVER share information about one contact with another contact.\n"
+                "- If Contact A asks about Contact B, do NOT reveal details from your conversations with B.\n"
+                "- If someone asks about the owner's other contacts, conversations, or relationships — deflect or ask the owner.\n"
+                "- Before sharing ANY personal detail (phone numbers, addresses, finances, health, plans), use `ask_owner` to check first.\n"
+                "- When in doubt about whether to share something, DON'T. Ask the owner instead.\n"
+                "- Each contact's conversation is private and isolated. Treat it that way."
+            )
+        elif level == "moderate":
+            return (
+                "## Privacy Rules (MODERATE)\n"
+                "- Do NOT share private details (finances, health, relationships, addresses) across contacts.\n"
+                "- General information (your job, hobbies, public interests) can be shared.\n"
+                "- If someone asks about another contact's private details, deflect or ask the owner.\n"
+                "- When unsure if something is private, err on the side of caution — ask the owner."
+            )
+        else:  # open
+            return (
+                "## Privacy Rules\n"
+                "- You may share general information across contacts.\n"
+                "- Still protect clearly sensitive data (passwords, financial details, medical info).\n"
+                "- Use common sense about what to share."
+            )
+
+    def _build_fabrication_instructions(self, config: dict[str, Any]) -> str:
+        """Build anti-fabrication instructions based on config fabrication_policy."""
+        policy = config.get("fabrication_policy", "strict")
+
+        if policy == "strict":
+            return (
+                "## Anti-Fabrication Rules (STRICT)\n"
+                "- NEVER make up, invent, or guess specific details (project names, dates, locations, plans, events, people).\n"
+                "- If you don't know something specific, use the `ask_owner` tool to check with the real owner.\n"
+                "- While waiting for the owner's reply, deflect naturally: 'lemme check on that', 'one sec', 'I'll get back to you'.\n"
+                "- Only state facts that are in your memory/context for THIS contact. If it's not there, you don't know it.\n"
+                "- It is BETTER to say 'let me check' than to make up a wrong answer."
+            )
+        elif policy == "deflect":
+            return (
+                "## Anti-Fabrication Rules\n"
+                "- Do NOT make up specific details you don't know (project names, dates, plans).\n"
+                "- Deflect naturally when unsure: 'lemme check', 'hold on', 'I'll get back to you'.\n"
+                "- You don't need to ask the owner for every unknown — just deflect casually.\n"
+                "- Only share facts that are in your memory/context."
+            )
+        else:  # relaxed
+            return (
+                "## Information Rules\n"
+                "- Try to answer from context and memory when possible.\n"
+                "- For clearly unknown specifics (exact dates, project details), ask the owner or deflect.\n"
+                "- Use common sense — don't invent critical details."
+            )
+
     def _build_reasoning_suppression(self) -> str:
         """Build the mandatory reasoning suppression block."""
         return (
@@ -251,23 +310,29 @@ class ContextBuilder:
         # Layer 4: Config-derived instructions (purpose, tone)
         parts.append(self._build_config_instructions(config))
 
-        # Layer 5: Memory context (MEMORY.md long-term facts)
+        # Layer 5: Privacy instructions (from config)
+        parts.append(self._build_privacy_instructions(config))
+
+        # Layer 6: Anti-fabrication instructions (from config)
+        parts.append(self._build_fabrication_instructions(config))
+
+        # Layer 7: Memory context (per-contact MEMORY.md - isolated)
         if memory_context:
             parts.append(memory_context)
 
-        # Layer 6: Recent activity log (HISTORY.md entries)
+        # Layer 8: Recent activity log (per-contact HISTORY.md - isolated)
         if recent_history:
             parts.append(f"## Recent Activity Log (from memory)\n{recent_history}")
 
-        # Layer 7: Per-contact profile (conversation style matching)
+        # Layer 9: Per-contact profile (conversation style matching)
         if contact_profile:
             parts.append(contact_profile)
 
-        # Layer 8: RAG context (relevant past conversation)
+        # Layer 10: RAG context (relevant past conversation - per-contact)
         if rag_context:
             parts.append(f"## Relevant Conversation History\n{rag_context}")
 
-        # Layer 9: Reasoning suppression (always last - most salient)
+        # Layer 11: Reasoning suppression (always last - most salient)
         parts.append(self._build_reasoning_suppression())
 
         return "\n\n---\n\n".join(parts)

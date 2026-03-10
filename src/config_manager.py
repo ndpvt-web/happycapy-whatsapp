@@ -59,6 +59,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "owner_name": "",
     # Alert on every message in auto_reply mode? (False in impersonate mode - bot handles it)
     "alert_on_auto_reply": False,
+    # Privacy level: "strict" (never share cross-contact), "moderate", "open"
+    "privacy_level": "strict",
+    # Fabrication policy: "strict" (always ask owner), "deflect", "relaxed"
+    "fabrication_policy": "strict",
 }
 
 # Environment variable overrides (Theorem T4)
