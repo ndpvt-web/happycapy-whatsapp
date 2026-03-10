@@ -87,19 +87,27 @@ TOOL_DEFINITIONS: list[dict] = [
         "function": {
             "name": "create_pdf",
             "description": (
-                "Create a PDF document with formatted text content. "
-                "Use when the user asks for a document, report, letter, or PDF file."
+                "Create a professional PDF document compiled from LaTeX source. "
+                "Use when the user asks for a document, report, letter, resume, invoice, or PDF file. "
+                "The content MUST be a complete LaTeX document starting with \\documentclass. "
+                "Use packages like geometry, fancyhdr, titlesec, enumitem, hyperref for professional formatting. "
+                "For tables use tabularx or longtable. For math use amsmath. "
+                "Do NOT use any packages that require external files or network access."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "title": {
                         "type": "string",
-                        "description": "Title of the document",
+                        "description": "Title of the document (used for filename only)",
                     },
                     "content": {
                         "type": "string",
-                        "description": "Content of the document. Use \\n\\n for paragraph breaks.",
+                        "description": (
+                            "Complete LaTeX source code starting with \\documentclass. "
+                            "Must be a self-contained .tex file that compiles with pdflatex. "
+                            "Example: \\documentclass{article}\\begin{document}Hello\\end{document}"
+                        ),
                     },
                 },
                 "required": ["title", "content"],
@@ -473,9 +481,10 @@ class ToolExecutor:
     # ── PDF Creation ──
 
     async def _create_pdf(self, args: dict[str, Any]) -> ToolResult:
-        """Create a PDF document using reportlab."""
-        if SimpleDocTemplate is None:
-            return ToolResult(False, "create_pdf", "PDF creation unavailable (reportlab not installed)")
+        """Create a PDF document by compiling LaTeX source with pdflatex."""
+        import shutil
+        import subprocess
+        import tempfile
 
         title = args.get("title", "Document").strip()
         content = args.get("content", "").strip()
@@ -486,16 +495,123 @@ class ToolExecutor:
         filename = f"generated_pdf_{int(time.time())}.pdf"
         filepath = self.MEDIA_DIR / filename
 
+        # Detect if content is LaTeX source
+        is_latex = (
+            "\\documentclass" in content
+            or "\\begin{document}" in content
+        )
+
+        if is_latex:
+            return await self._compile_latex(content, title, filepath)
+        else:
+            return await self._create_pdf_reportlab(content, title, filepath)
+
+    # Path to the latex-document skill's compile script
+    COMPILE_LATEX_SH = Path.home() / ".claude" / "skills" / "latex-document" / "scripts" / "compile_latex.sh"
+
+    async def _compile_latex(
+        self, latex_src: str, title: str, filepath: Path,
+    ) -> ToolResult:
+        """Compile LaTeX source to PDF using the latex-document skill's compile script."""
+        import shutil
+        import subprocess
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp(prefix="latex_")
+        tex_file = Path(tmpdir) / "document.tex"
+
+        try:
+            tex_file.write_text(latex_src, encoding="utf-8")
+
+            # Use the latex-document skill's compile_latex.sh if available
+            # (handles engine detection, multi-pass, bibliography, auto-fix)
+            if self.COMPILE_LATEX_SH.exists():
+                compile_cmd = [
+                    "bash", str(self.COMPILE_LATEX_SH),
+                    str(tex_file), "--quiet",
+                ]
+            else:
+                # Fallback: direct pdflatex
+                pdflatex = shutil.which("pdflatex")
+                if not pdflatex:
+                    return ToolResult(False, "create_pdf", "pdflatex not found on this system")
+                compile_cmd = [
+                    pdflatex,
+                    "-interaction=nonstopmode",
+                    "-halt-on-error",
+                    "-output-directory", tmpdir,
+                    str(tex_file),
+                ]
+
+            proc = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    compile_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    cwd=tmpdir,
+                ),
+            )
+
+            pdf_output = Path(tmpdir) / "document.pdf"
+            if not pdf_output.exists():
+                # Extract useful error from log
+                log_file = Path(tmpdir) / "document.log"
+                error_lines = []
+                if log_file.exists():
+                    for line in log_file.read_text(errors="replace").splitlines():
+                        if line.startswith("!") or "Error" in line:
+                            error_lines.append(line)
+                            if len(error_lines) >= 5:
+                                break
+                error_msg = "\n".join(error_lines[:5]) if error_lines else (proc.stderr or proc.stdout or "Unknown LaTeX error")[-500:]
+                return ToolResult(
+                    False, "create_pdf",
+                    f"LaTeX compilation failed:\n{error_msg}",
+                )
+
+            # Move compiled PDF to media directory
+            shutil.copy2(str(pdf_output), str(filepath))
+
+            if filepath.stat().st_size > self.MAX_FILE_SIZE:
+                filepath.unlink()
+                return ToolResult(False, "create_pdf", "Generated PDF exceeds 20MB limit")
+
+            return ToolResult(
+                success=True,
+                tool_name="create_pdf",
+                content=f"PDF document created: {title}",
+                media_path=str(filepath),
+            )
+
+        except subprocess.TimeoutExpired:
+            return ToolResult(False, "create_pdf", "LaTeX compilation timed out (120s limit)")
+        except Exception as e:
+            filepath.unlink(missing_ok=True)
+            return ToolResult(False, "create_pdf", f"PDF creation failed: {type(e).__name__}: {e}")
+        finally:
+            # Cleanup temp directory
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    async def _create_pdf_reportlab(
+        self, content: str, title: str, filepath: Path,
+    ) -> ToolResult:
+        """Fallback: create a simple PDF using reportlab for plain text content."""
+        if SimpleDocTemplate is None:
+            return ToolResult(
+                False, "create_pdf",
+                "PDF creation unavailable: provide LaTeX source (\\documentclass) or install reportlab",
+            )
+
         try:
             doc = SimpleDocTemplate(str(filepath), pagesize=letter)
             styles = getSampleStyleSheet()
             story = []
 
-            # Title
             story.append(Paragraph(self._escape_html(title), styles["Title"]))
             story.append(Spacer(1, 12))
 
-            # Content paragraphs
             for para in content.split("\n\n"):
                 text = para.strip()
                 if text:
