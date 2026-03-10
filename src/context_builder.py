@@ -249,15 +249,33 @@ class ContextBuilder:
             )
 
     def _build_integration_instructions(self, config: dict[str, Any]) -> str:
-        """Build integration-specific instructions from enabled integrations."""
+        """Build integration-specific instructions from enabled integrations.
+
+        Uses class methods (no instantiation) to avoid re-loading integrations
+        on every prompt build. system_prompt_addition() is a classmethod that
+        only needs config, not a live instance.
+        """
         enabled = config.get("enabled_integrations", ["core"])
         non_core = [n for n in enabled if n != "core"]
         if not non_core:
             return ""
         try:
-            from src.integrations import load_integrations, get_system_prompt_additions
-            integrations = load_integrations(non_core, config)
-            return get_system_prompt_additions(integrations, config)
+            import importlib
+            from src.integrations import REGISTRY
+            from src.integrations.base import BaseIntegration
+
+            parts: list[str] = []
+            for name in non_core:
+                module_path = REGISTRY.get(name)
+                if not module_path:
+                    continue
+                module = importlib.import_module(module_path)
+                cls = getattr(module, "Integration", None)
+                if cls and isinstance(cls, type) and issubclass(cls, BaseIntegration):
+                    addition = cls.system_prompt_addition(config)
+                    if addition:
+                        parts.append(addition)
+            return "\n\n".join(parts)
         except Exception:
             return ""
 

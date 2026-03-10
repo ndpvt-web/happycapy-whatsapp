@@ -572,11 +572,11 @@ class WhatsAppOrchestrator:
                     return
 
         # High importance: notify admin (if enabled and not from admin themselves)
-        # In impersonation mode, the bot handles messages via ask_owner tool -- no auto-alerts.
-        personality_mode = self.config.get("personality_mode", "impersonate")
+        # Always alert admin for high-importance messages regardless of personality mode.
+        # In impersonate mode, the bot also uses ask_owner for questions -- alerts are
+        # a separate safety net for messages the LLM might not escalate on its own.
         alert_enabled = (
             self.config.get("escalation_enabled", True)
-            and self.config.get("alert_on_auto_reply", personality_mode != "impersonate")
             and score >= self.config.get("importance_threshold", 7)
             and sender_id != admin_number
             and admin_number
