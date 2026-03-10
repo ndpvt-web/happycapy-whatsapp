@@ -451,3 +451,7 @@ The script auto-connects to the running bridge, sends, and disconnects.
 - `AI_GATEWAY_API_KEY` environment variable (auto-configured)
 - ffmpeg (for video processing - available in HappyCapy)
 - pdfplumber (for PDF text extraction - installed by setup.sh)
+- **latex-document skill** (for professional PDF generation via LaTeX compilation)
+  - If not already installed, clone from: `git clone https://github.com/ndpvt-web/latex-document-skill ~/.claude/skills/latex-document`
+  - The `create_pdf` tool uses the latex-document skill's `compile_latex.sh` script for multi-pass LaTeX compilation with automatic engine detection (pdflatex/xelatex/lualatex)
+  - Falls back to reportlab for plain text content when LaTeX is not used

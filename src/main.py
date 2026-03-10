@@ -58,6 +58,7 @@ from src.heartbeat_service import (
     make_sample_prune_task,
 )
 from src.context_builder import ContextBuilder
+from src.reflection_engine import ReflectionEngine
 from src.cron_service import CronService
 from src.session_manager import SessionManager
 from src.tool_executor import ToolExecutor, ToolResult, TOOL_DEFINITIONS
@@ -425,6 +426,14 @@ class WhatsAppOrchestrator:
         self.session_mgr: SessionManager | None = None
         # Tool executor (image gen, video gen, PDF creation)
         self.tool_executor: ToolExecutor | None = None
+        # Reflection engine (learns from mistakes and owner corrections)
+        self.reflection: ReflectionEngine | None = None
+        # Escalation context tracker: maps admin_number -> list of recent alerts
+        # Each alert: {"sender_id": ..., "sender_name": ..., "content_preview": ..., "timestamp": ...}
+        self._recent_escalation_alerts: list[dict] = []
+        self._ESCALATION_ALERT_MAX = 20  # Keep last 20 alerts for context matching
+        # Track last bot response per contact for correction detection
+        self._last_bot_response: dict[str, str] = {}  # sender_id -> last response
 
     def print_setup_instructions(self) -> None:
         """Print the setup wizard questions for the user to answer via AskUserQuestion."""
@@ -541,6 +550,26 @@ class WhatsAppOrchestrator:
             await self._handle_admin_command(chat_id, content.strip(), metadata)
             return
 
+        # Owner correction detection: when admin manually types in a contact's chat
+        # (not their own), and the bot had previously replied, record as correction.
+        if admin_number and sender_id == admin_number:
+            contact_jid = chat_id.split("@")[0] if "@" in chat_id else chat_id
+            if contact_jid != admin_number and self.reflection and contact_jid in self._last_bot_response:
+                bot_said = self._last_bot_response.pop(contact_jid)
+                contact_name = ""
+                if self.contact_store:
+                    profile = self.contact_store.get_profile(contact_jid)
+                    contact_name = profile.get("name", "") if profile else ""
+                self.reflection.record_correction(
+                    bot_said=bot_said,
+                    owner_correction=content,
+                    contact_id=contact_jid,
+                    contact_name=contact_name,
+                )
+                print(f"[reflection] Recorded owner correction for {contact_name or contact_jid}")
+                # Don't process further -- admin's direct chat message goes to the contact as-is
+                return
+
         # ── Intelligence layer: score, queue, audit (T_SCOREPLUGIN, T_QUEUEFIRST, T_AUDITALL) ──
         score, reasons = (5, [])
         queue_id = None
@@ -601,6 +630,18 @@ class WhatsAppOrchestrator:
                 alert = f"*[{score}/10]* {sender_name}:\n{preview}"
                 try:
                     await self.channel.send_text(admin_jid, alert)
+                    # Track alert for escalation context matching when admin replies
+                    from datetime import datetime as _dt
+                    self._recent_escalation_alerts.append({
+                        "sender_id": sender_id,
+                        "sender_name": sender_name,
+                        "content_preview": content[:500],
+                        "score": score,
+                        "timestamp": _dt.now().isoformat(),
+                    })
+                    # Trim to max size
+                    if len(self._recent_escalation_alerts) > self._ESCALATION_ALERT_MAX:
+                        self._recent_escalation_alerts = self._recent_escalation_alerts[-self._ESCALATION_ALERT_MAX:]
                 except Exception:
                     pass  # Don't fail main pipeline if admin alert fails
 
@@ -775,6 +816,20 @@ class WhatsAppOrchestrator:
         if session_context:
             system_prompt = system_prompt + "\n\n" + session_context
 
+        # Inject reflection lessons (learned from past mistakes/corrections)
+        if self.reflection:
+            lessons_ctx = self.reflection.get_lessons_for_prompt(contact_id=sender_id)
+            if lessons_ctx:
+                system_prompt = system_prompt + "\n\n---\n\n" + lessons_ctx
+
+        # Escalation context injection for admin replies:
+        # When admin sends a non-slash message, check if it's about a recent escalation.
+        # If so, inject the escalation context so the AI knows what it's replying to.
+        if sender_id == admin_number and self._recent_escalation_alerts:
+            esc_context = self._build_escalation_context_for_admin(content)
+            if esc_context:
+                system_prompt = system_prompt + "\n\n---\n\n" + esc_context
+
         # Generate AI response with multimodal content and optional tool calling.
         # Theorem T_POOL: Pass shared client for connection reuse.
         use_tools = self.config.get("tool_calling_enabled", True) and self.tool_executor is not None
@@ -904,6 +959,9 @@ class WhatsAppOrchestrator:
             if self.audit_log:
                 self.audit_log.log("msg_out", chat_id, "outbound", len(response), "")
 
+            # Track last bot response per contact for correction detection
+            self._last_bot_response[sender_id] = response[:500]
+
             # Theorem T_FIRE: Fire-and-forget assistant sample storage.
             if self.contact_store:
                 asyncio.create_task(self.contact_store.store_sample(sender_id, "assistant", response))
@@ -917,6 +975,76 @@ class WhatsAppOrchestrator:
         if (self.memory and
             self._message_count_since_consolidation >= self._CONSOLIDATION_THRESHOLD):
             asyncio.create_task(self._consolidate_memory())
+            # Also trigger self-reflection alongside consolidation
+            if self.reflection and self.contact_store:
+                asyncio.create_task(self._run_self_reflection())
+
+    def _build_escalation_context_for_admin(self, admin_message: str) -> str:
+        """Build context for admin's reply by matching it to recent escalation alerts.
+
+        When admin sends a non-slash-command message, this checks if it's likely
+        a reply to a recent escalation alert. Returns context string for injection
+        into the system prompt, so the AI knows what the admin is replying to.
+        """
+        if not self._recent_escalation_alerts:
+            return ""
+
+        # Strategy: show the most recent escalation alerts to give the AI context.
+        # The AI can then determine which one the admin is replying to.
+        from datetime import datetime as _dt
+
+        # Filter alerts from last 2 hours only
+        cutoff = _dt.now().timestamp() - 7200  # 2 hours
+        recent = []
+        for alert in reversed(self._recent_escalation_alerts):
+            try:
+                ts = _dt.fromisoformat(alert["timestamp"]).timestamp()
+                if ts >= cutoff:
+                    recent.append(alert)
+            except (ValueError, KeyError):
+                recent.append(alert)  # Include if timestamp unparseable
+
+        if not recent:
+            return ""
+
+        # Also check pending escalations from the EscalationEngine (ask_owner)
+        pending_esc = ""
+        if self.escalation:
+            pending = self.escalation.pending()
+            if pending:
+                esc_lines = []
+                for esc in pending[:5]:
+                    name = esc.get("sender_name") or esc["sender_id"]
+                    esc_lines.append(f"  [{esc['code']}] From {name}: {esc.get('question_preview', '?')}")
+                pending_esc = "\nPending ask_owner escalations:\n" + "\n".join(esc_lines)
+
+        # Build context block
+        lines = [
+            "## Escalation Context (YOU ARE THE ADMIN / PHONE OWNER)",
+            "You are receiving a message from yourself (the admin/owner).",
+            "This is likely a reply to one of these recent escalation alerts you received:",
+            "",
+        ]
+        for i, alert in enumerate(recent[:10]):
+            name = alert.get("sender_name", alert.get("sender_id", "?"))
+            preview = alert.get("content_preview", "")[:200]
+            score = alert.get("score", "?")
+            lines.append(f"{i+1}. [{score}/10] *{name}*: {preview}")
+
+        if pending_esc:
+            lines.append(pending_esc)
+
+        lines.extend([
+            "",
+            "INSTRUCTIONS FOR ADMIN REPLY:",
+            "- The admin is telling you what to reply to a specific contact.",
+            "- Determine which contact/escalation the admin is responding to.",
+            "- Use the send_message tool to forward the admin's reply to the correct contact.",
+            "- If you can't determine which contact, ask the admin to clarify.",
+            "- The reply should go TO the contact, not back to the admin.",
+        ])
+
+        return "\n".join(lines)
 
     async def _consolidate_memory(self) -> None:
         """Background task: consolidate per-contact memory (isolated).
@@ -951,6 +1079,46 @@ class WhatsAppOrchestrator:
                 print(f"[memory] Consolidated {total} messages across {len(active_contacts)} contacts")
         except Exception as e:
             print(f"[memory] Consolidation error: {e}")
+
+    async def _run_self_reflection(self) -> None:
+        """Background task: LLM-powered self-reflection on recent interactions.
+
+        Analyzes recent bot responses for mistakes, tone issues, and areas
+        for improvement. Stores lessons in the reflection database.
+        """
+        if not self.reflection or not self.contact_store:
+            return
+        try:
+            api_key = os.environ.get("AI_GATEWAY_API_KEY", "")
+            api_url = self.config.get("ai_gateway_url", "https://ai-gateway.happycapy.ai/api/v1/openai/v1")
+            model = self.config.get("ai_model", "gpt-4.1-mini")
+            if not api_key:
+                return
+
+            # Gather recent interactions from all active contacts
+            recent_interactions = []
+            active_jids = self.contact_store.get_active_jids(min_samples=2)
+            for jid, name in active_jids[:10]:  # Max 10 contacts
+                samples = self.contact_store.get_recent_samples(jid, limit=5)
+                for s in samples:
+                    recent_interactions.append({
+                        "role": s.get("role", "?"),
+                        "content": s.get("content", ""),
+                        "contact_name": name or jid,
+                    })
+
+            if len(recent_interactions) < 4:
+                return  # Not enough data to reflect on
+
+            lessons = await self.reflection.reflect(
+                recent_interactions, api_url, api_key, model
+            )
+            # Expire old lessons periodically (alongside reflection)
+            expired = self.reflection.expire_old_lessons()
+            if expired:
+                print(f"[reflection] Expired {expired} old lessons")
+        except Exception as e:
+            print(f"[reflection] Self-reflection error: {e}")
 
     async def _handle_admin_command(self, chat_id: str, command: str, metadata: dict | None = None) -> None:
         """Handle an admin slash command via WhatsApp (Theorem T_ADMCMD).
@@ -1007,6 +1175,7 @@ class WhatsAppOrchestrator:
                 "/memorysearch <query> - Search memory history\n"
                 "/kg - Knowledge graph stats (or /kg search|extract)\n"
                 "/tools - Tool calling status (or /tools on|off)\n"
+                "/reflect - Reflection engine stats (lessons learned)\n"
                 "/help - This message"
             )
             await self.channel.send_text(chat_id, help_text)
@@ -1210,6 +1379,15 @@ class WhatsAppOrchestrator:
                         await self.channel.send_text(chat_id, f"[{code}] Reply sent to {sender_name}")
                         if self.audit_log:
                             self.audit_log.log("escalation", chat_id, "outbound", len(answer), "", {"code": code})
+                        # Learn from this escalation answer for future reuse
+                        if self.reflection:
+                            esc_record = self.escalation.get(code)
+                            if esc_record:
+                                self.reflection.record_escalation_answer(
+                                    question=esc_record.get("question_preview", ""),
+                                    answer=answer,
+                                    contact_id=result["sender_id"],
+                                )
                     except Exception as e:
                         await self.channel.send_text(chat_id, f"[{code}] Failed to send reply: {e}")
                 else:
@@ -1815,6 +1993,30 @@ class WhatsAppOrchestrator:
             else:
                 await self.channel.send_text(chat_id, "Usage: /kg [stats|search <query>|extract]")
 
+        elif cmd == "/reflect":
+            if not self.reflection:
+                await self.channel.send_text(chat_id, "Reflection engine not initialized.")
+            elif args.strip() == "run":
+                await self.channel.send_text(chat_id, "Running self-reflection...")
+                asyncio.create_task(self._run_self_reflection())
+            else:
+                stats = self.reflection.get_stats()
+                lessons_text = self.reflection.get_lessons_for_prompt()
+                text = (
+                    f"*Reflection Engine*\n\n"
+                    f"Total lessons: {stats['total_lessons']}\n"
+                    f"  From corrections: {stats['from_corrections']}\n"
+                    f"  From self-reflection: {stats['from_reflections']}\n"
+                    f"Cached escalation answers: {stats['escalation_answers_cached']}\n"
+                    f"Recent alerts tracked: {len(self._recent_escalation_alerts)}\n\n"
+                )
+                if lessons_text:
+                    text += f"*Active Lessons:*\n{lessons_text[:2000]}"
+                else:
+                    text += "No active lessons yet."
+                text += "\n\nForce self-reflection: /reflect run"
+                await self.channel.send_text(chat_id, text)
+
         elif cmd == "/tools":
             enabled = self.config.get("tool_calling_enabled", True)
             status = "enabled" if enabled else "disabled"
@@ -1962,6 +2164,9 @@ class WhatsAppOrchestrator:
         self.templates = AutoReplyTemplates(db_path)
         self.kg = KnowledgeGraph(db_path)
         self.escalation = EscalationEngine(db_path)
+        # Reflection engine (learns from mistakes and corrections)
+        reflection_db = get_config_dir() / "reflection.db"
+        self.reflection = ReflectionEngine(reflection_db)
         # Two-layer memory system
         self.memory = MemoryStore(get_config_dir())
         self.memory_search = MemorySearch(self.memory)
@@ -2015,7 +2220,7 @@ class WhatsAppOrchestrator:
                 if self.audit_log:
                     self.audit_log.log("cron_fire", target, "outbound", len(msg), "", {"job_id": job["id"], "kind": job["kind"]})
         self.cron.set_callback(_cron_callback)
-        print("Intelligence layer initialized (scoring, queue, escalation, KG, templates, audit, memory, quiet_hours, guards, health, heartbeat, context, session, cron)")
+        print("Intelligence layer initialized (scoring, queue, escalation, KG, templates, audit, memory, reflection, quiet_hours, guards, health, heartbeat, context, session, cron)")
 
         # Tool executor: image gen, video gen, PDF creation (needs http_client, set below)
         self.tool_executor = ToolExecutor(self.config)
