@@ -222,6 +222,9 @@ class ToolExecutor:
 
     All generated files are saved to MEDIA_DIR to satisfy WhatsAppChannel.send_media()
     security path validation.
+
+    Supports pluggable integrations: core tools are built-in, additional tools
+    are loaded from src.integrations based on config["enabled_integrations"].
     """
 
     MEDIA_DIR = Path.home() / ".happycapy-whatsapp" / "media"
@@ -235,10 +238,41 @@ class ToolExecutor:
         self._escalation = escalation  # EscalationEngine for ask_owner tool
         self.MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
+        # Load pluggable integrations
+        self._integrations: dict = {}
+        self._integration_tool_map: dict = {}  # tool_name -> integration instance
+        self._load_integrations()
+
+    def _load_integrations(self) -> None:
+        """Load enabled integrations from config."""
+        enabled = self.config.get("enabled_integrations", ["core"])
+        non_core = [n for n in enabled if n != "core"]
+        if not non_core:
+            return
+        try:
+            from src.integrations import load_integrations, get_all_tool_definitions
+            self._integrations = load_integrations(
+                non_core, self.config,
+                client=self._client, channel=self._channel,
+            )
+            for name, integ in self._integrations.items():
+                for td in integ.tool_definitions():
+                    self._integration_tool_map[td["function"]["name"]] = integ
+        except Exception as e:
+            print(f"[tool-executor] Failed to load integrations: {type(e).__name__}: {e}")
+
+    def get_tool_definitions(self) -> list[dict]:
+        """Get all tool definitions: core + integration tools."""
+        all_defs = list(TOOL_DEFINITIONS)
+        for integ in self._integrations.values():
+            all_defs.extend(integ.tool_definitions())
+        return all_defs
+
     async def execute(self, tool_name: str, arguments: dict[str, Any]) -> ToolResult:
         """Execute a tool by name and return the result.
 
         Never raises -- all exceptions are caught and returned as ToolResult with success=False.
+        Checks core handlers first, then delegates to integrations.
         """
         handlers = {
             "generate_image": self._generate_image,
@@ -250,24 +284,38 @@ class ToolExecutor:
         }
 
         handler = handlers.get(tool_name)
-        if not handler:
-            return ToolResult(
-                success=False,
-                tool_name=tool_name,
-                content=f"Unknown tool: {tool_name}",
-                error_message=f"Unknown tool: {tool_name}",
-            )
+        if handler:
+            try:
+                return await handler(arguments)
+            except Exception as e:
+                print(f"[tool-executor] {tool_name} error: {type(e).__name__}")
+                return ToolResult(
+                    success=False,
+                    tool_name=tool_name,
+                    content=f"Tool execution failed: {type(e).__name__}",
+                    error_message=str(e),
+                )
 
-        try:
-            return await handler(arguments)
-        except Exception as e:
-            print(f"[tool-executor] {tool_name} error: {type(e).__name__}")
-            return ToolResult(
-                success=False,
-                tool_name=tool_name,
-                content=f"Tool execution failed: {type(e).__name__}",
-                error_message=str(e),
-            )
+        # Delegate to integration if not a core tool
+        integ = self._integration_tool_map.get(tool_name)
+        if integ:
+            try:
+                return await integ.execute(tool_name, arguments)
+            except Exception as e:
+                print(f"[tool-executor] integration {tool_name} error: {type(e).__name__}")
+                return ToolResult(
+                    success=False,
+                    tool_name=tool_name,
+                    content=f"Tool execution failed: {type(e).__name__}",
+                    error_message=str(e),
+                )
+
+        return ToolResult(
+            success=False,
+            tool_name=tool_name,
+            content=f"Unknown tool: {tool_name}",
+            error_message=f"Unknown tool: {tool_name}",
+        )
 
     # ── Image Generation ──
 

@@ -63,6 +63,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "privacy_level": "strict",
     # Fabrication policy: "strict" (always ask owner), "deflect", "relaxed"
     "fabrication_policy": "strict",
+    # Pluggable integrations: "core" (always), "spreadsheet", "email"
+    "enabled_integrations": ["core"],
 }
 
 # Environment variable overrides (Theorem T4)
@@ -274,6 +276,10 @@ def validate_config(config: dict[str, Any]) -> list[str]:
     qr_port = config.get("qr_server_port", 0)
     if not isinstance(qr_port, int) or qr_port < 1024 or qr_port == 3001:
         issues.append(f"Invalid qr_server_port: {qr_port} (must be >= 1024, not 3001)")
+
+    enabled_integrations = config.get("enabled_integrations", ["core"])
+    if not isinstance(enabled_integrations, list):
+        issues.append("enabled_integrations must be a list")
 
     return issues
 

@@ -248,6 +248,19 @@ class ContextBuilder:
                 "- Use common sense — don't invent critical details."
             )
 
+    def _build_integration_instructions(self, config: dict[str, Any]) -> str:
+        """Build integration-specific instructions from enabled integrations."""
+        enabled = config.get("enabled_integrations", ["core"])
+        non_core = [n for n in enabled if n != "core"]
+        if not non_core:
+            return ""
+        try:
+            from src.integrations import load_integrations, get_system_prompt_additions
+            integrations = load_integrations(non_core, config)
+            return get_system_prompt_additions(integrations, config)
+        except Exception:
+            return ""
+
     def _build_reasoning_suppression(self) -> str:
         """Build the mandatory reasoning suppression block."""
         return (
@@ -332,7 +345,12 @@ class ContextBuilder:
         if rag_context:
             parts.append(f"## Relevant Conversation History\n{rag_context}")
 
-        # Layer 11: Reasoning suppression (always last - most salient)
+        # Layer 11: Integration-specific instructions (from enabled integrations)
+        integration_prompt = self._build_integration_instructions(config)
+        if integration_prompt:
+            parts.append(integration_prompt)
+
+        # Layer 12: Reasoning suppression (always last - most salient)
         parts.append(self._build_reasoning_suppression())
 
         return "\n\n---\n\n".join(parts)

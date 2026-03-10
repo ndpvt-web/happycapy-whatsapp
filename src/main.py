@@ -223,6 +223,21 @@ SETUP_QUESTIONS = [
              "description": "Don't even log group messages"},
         ],
     },
+    {
+        "id": "integrations",
+        "question": "Which extra features would you like to enable?",
+        "header": "Integrations",
+        "options": [
+            {"label": "None (Just AI chat)", "value": "none",
+             "description": "Core features only: AI replies, image/video/PDF generation"},
+            {"label": "Spreadsheet Tracking", "value": "spreadsheet",
+             "description": "Log orders, expenses, customer data to Excel spreadsheets"},
+            {"label": "Email Sending", "value": "email",
+             "description": "Send emails (invoices, confirmations) via the bot"},
+            {"label": "Both (Recommended for business)", "value": "both",
+             "description": "Full business suite: spreadsheet tracking + email sending"},
+        ],
+    },
 ]
 
 
@@ -257,6 +272,17 @@ def map_answers_to_config(answers: dict[str, str]) -> dict:
 
     # Media
     config["media_handling"] = answers.get("media", "acknowledge")
+
+    # Integrations
+    integ = answers.get("integrations", "none")
+    if integ == "spreadsheet":
+        config["enabled_integrations"] = ["core", "spreadsheet"]
+    elif integ == "email":
+        config["enabled_integrations"] = ["core", "email"]
+    elif integ == "both":
+        config["enabled_integrations"] = ["core", "spreadsheet", "email"]
+    else:
+        config["enabled_integrations"] = ["core"]
 
     # Admin number (Theorem T_ADMCMD)
     admin = answers.get("admin_number", "skip")
@@ -759,7 +785,7 @@ class WhatsAppOrchestrator:
             config=self.config,
             media_content=media_content_parts if media_content_parts else None,
             client=self._http_client,
-            tools=TOOL_DEFINITIONS if use_tools else None,
+            tools=self.tool_executor.get_tool_definitions() if use_tools else None,
         )
 
         # Cleanup temporary files
@@ -1792,7 +1818,8 @@ class WhatsAppOrchestrator:
         elif cmd == "/tools":
             enabled = self.config.get("tool_calling_enabled", True)
             status = "enabled" if enabled else "disabled"
-            tool_names = [t["function"]["name"] for t in TOOL_DEFINITIONS]
+            tool_defs = self.tool_executor.get_tool_definitions() if self.tool_executor else TOOL_DEFINITIONS
+            tool_names = [t["function"]["name"] for t in tool_defs]
             text = (
                 f"*Tool Calling: {status}*\n\n"
                 f"Available tools ({len(tool_names)}):\n"
