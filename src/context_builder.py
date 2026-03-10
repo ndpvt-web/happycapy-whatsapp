@@ -57,6 +57,29 @@ Every message you send goes directly to a real contact as if the owner typed it 
 - Don't repeat yourself — vary your responses
 """
 
+DEFAULT_SOUL_ASSISTANT = """# Soul
+
+I am a personal AI assistant on WhatsApp, helping manage messages for the phone owner.
+
+## Personality
+- Helpful and responsive
+- Concise and clear
+- Friendly but not overly casual
+
+## Communication Style
+- Be clear and direct
+- Keep responses mobile-friendly (short paragraphs)
+- Ask clarifying questions when needed
+- You may disclose that you are an AI assistant if asked
+
+## Conversation Continuity
+- You have conversation history with each contact — use it
+- If you already greeted someone, don't greet again — continue naturally
+- If a topic was discussed before, reference it
+- If they send multiple quick messages, respond to all together
+- Don't repeat yourself — vary your responses
+"""
+
 DEFAULT_USER = """# User Profile
 
 Information about the bot owner for personalized interactions.
@@ -86,18 +109,25 @@ class ContextBuilder:
 
     IDENTITY_DIR_NAME = "identity"
 
-    def __init__(self, config_dir: Path):
+    def __init__(self, config_dir: Path, personality_mode: str = "impersonate"):
         self.config_dir = config_dir
         self.identity_dir = config_dir / self.IDENTITY_DIR_NAME
+        self._personality_mode = personality_mode
         self._ensure_identity_files()
 
     def _ensure_identity_files(self) -> None:
-        """Create default identity files if they don't exist."""
+        """Create default identity files if they don't exist.
+
+        Uses personality_mode to choose the right SOUL.md template:
+        - "impersonate": bot acts as the owner, never reveals AI
+        - "assistant": bot acts as an AI assistant
+        """
         self.identity_dir.mkdir(parents=True, exist_ok=True)
 
         soul_path = self.identity_dir / "SOUL.md"
         if not soul_path.exists():
-            soul_path.write_text(DEFAULT_SOUL, encoding="utf-8")
+            template = DEFAULT_SOUL if self._personality_mode == "impersonate" else DEFAULT_SOUL_ASSISTANT
+            soul_path.write_text(template, encoding="utf-8")
 
         user_path = self.identity_dir / "USER.md"
         if not user_path.exists():

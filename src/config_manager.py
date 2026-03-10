@@ -53,6 +53,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "quiet_hours_override_threshold": 9,   # Score >= this bypasses quiet hours
     # Tool calling (LLM function calling for image gen, video gen, PDF creation)
     "tool_calling_enabled": True,
+    # Personality mode: "impersonate" (act as owner) or "assistant" (act as AI assistant)
+    "personality_mode": "impersonate",
+    # Owner's name (used in impersonation mode for natural responses)
+    "owner_name": "",
+    # Alert on every message in auto_reply mode? (False in impersonate mode - bot handles it)
+    "alert_on_auto_reply": False,
 }
 
 # Environment variable overrides (Theorem T4)

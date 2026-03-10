@@ -111,8 +111,19 @@ SETUP_QUESTIONS = [
         ],
     },
     {
+        "id": "personality_mode",
+        "question": "How should the bot behave when replying to your contacts?",
+        "header": "Personality",
+        "options": [
+            {"label": "Act as me (Recommended)", "value": "impersonate",
+             "description": "Reply AS you — contacts won't know it's AI. Never reveals it's a bot. Asks you when unsure."},
+            {"label": "Act as my assistant", "value": "assistant",
+             "description": "Reply as an AI assistant on your behalf. Contacts know it's automated."},
+        ],
+    },
+    {
         "id": "tone",
-        "question": "What tone should the AI use when replying?",
+        "question": "What tone should be used when replying?",
         "header": "Tone",
         "options": [
             {"label": "Casual & Friendly (Recommended)", "value": "casual_friendly",
@@ -194,9 +205,14 @@ def map_answers_to_config(answers: dict[str, str]) -> dict:
     config = dict(DEFAULT_CONFIG)
 
     config["purpose"] = answers.get("purpose", "personal_assistant")
+    config["personality_mode"] = answers.get("personality_mode", "impersonate")
     config["tone"] = answers.get("tone", "casual_friendly")
     config["mode"] = answers.get("mode", "auto_reply")
     config["group_policy"] = answers.get("group_policy", "monitor")
+
+    # In impersonation mode, disable auto-alerts (bot uses ask_owner tool instead)
+    if config["personality_mode"] == "impersonate":
+        config["alert_on_auto_reply"] = False
 
     # Contact access
     contact_access = answers.get("contact_access", "everyone")
@@ -502,10 +518,16 @@ class WhatsAppOrchestrator:
                     return
 
         # High importance: notify admin (if enabled and not from admin themselves)
-        # Quiet hours: suppress non-critical alerts and queue for digest (nanobot GroupAlerter pattern)
-        if (self.config.get("escalation_enabled", True) and
-            score >= self.config.get("importance_threshold", 7) and
-            sender_id != admin_number and admin_number):
+        # In impersonation mode, the bot handles messages via ask_owner tool -- no auto-alerts.
+        personality_mode = self.config.get("personality_mode", "impersonate")
+        alert_enabled = (
+            self.config.get("escalation_enabled", True)
+            and self.config.get("alert_on_auto_reply", personality_mode != "impersonate")
+            and score >= self.config.get("importance_threshold", 7)
+            and sender_id != admin_number
+            and admin_number
+        )
+        if alert_enabled:
             sender_name = metadata.get("sender_name", sender_id)
             alert_data = {
                 "sender_id": sender_id,
@@ -520,7 +542,9 @@ class WhatsAppOrchestrator:
                 print(f"[quiet-hours] Alert suppressed for {sender_name} (score {score})")
             else:
                 admin_jid = f"{admin_number}@s.whatsapp.net"
-                alert = f"[Priority {score}/10] From: {sender_name}\n({len(content)} chars)\nReasons: {', '.join(reasons)}"
+                # Include actual message preview so admin knows what was said
+                preview = content[:300] + ("..." if len(content) > 300 else "")
+                alert = f"*[{score}/10]* {sender_name}:\n{preview}"
                 try:
                     await self.channel.send_text(admin_jid, alert)
                 except Exception:
@@ -1884,7 +1908,10 @@ class WhatsAppOrchestrator:
         self.content_filter = ContentFilter()
         self.health_monitor = HealthMonitor()
         # Context builder: layered system prompt assembly with identity files
-        self.context_builder = ContextBuilder(get_config_dir())
+        self.context_builder = ContextBuilder(
+            get_config_dir(),
+            personality_mode=self.config.get("personality_mode", "impersonate"),
+        )
         # Heartbeat service: periodic maintenance every 30 minutes
         self.heartbeat = HeartbeatService(interval_s=30 * 60)
         self.heartbeat.register_task("queue_cleanup", make_queue_cleanup_task(self.message_queue))
