@@ -334,7 +334,7 @@ class WhatsAppOrchestrator:
         self.memory: MemoryStore | None = None
         self.memory_search: MemorySearch | None = None
         self._message_count_since_consolidation = 0
-        self._CONSOLIDATION_THRESHOLD = 30  # Consolidate every N messages
+        self._CONSOLIDATION_THRESHOLD = 10  # Consolidate every N messages
         # Quiet hours system
         self.quiet_hours: QuietHours | None = None
         # Security guards
@@ -1937,9 +1937,11 @@ class WhatsAppOrchestrator:
                 limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
             )
             print("HTTP client pool initialized (T_POOL: connection reuse enabled)")
-            # Share pool with tool executor for connection reuse
+            # Share pool, channel, and escalation engine with tool executor
             if self.tool_executor:
                 self.tool_executor._client = self._http_client
+                self.tool_executor._channel = self.channel
+                self.tool_executor._escalation = self.escalation
 
         # Mark bridge running in health monitor
         if self.health_monitor:

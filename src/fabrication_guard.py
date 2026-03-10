@@ -87,6 +87,14 @@ _ALLOWED_DEFLECTIONS = [
 ]
 
 # Default safe deflection replacement
+_DEFLECTION_POOL = [
+    "hmm let me check on that",
+    "not sure about that tbh",
+    "lemme get back to you",
+    "i'll check and let you know",
+    "hold on, let me find out",
+]
+
 DEFAULT_DEFLECTION = "ill get back to you on that"
 
 
@@ -108,8 +116,9 @@ class FabricationGuard:
     Safe deflections and vague responses are allowed.
     """
 
-    def __init__(self, confidence_threshold: float = 0.50):
+    def __init__(self, confidence_threshold: float = 0.70):
         self.confidence_threshold = confidence_threshold
+        self._deflection_idx = 0
 
     def check(self, text: str) -> FabricationResult:
         """Check AI response text for fabricated personal claims.
@@ -143,10 +152,14 @@ class FabricationGuard:
         if not matches or max_confidence < self.confidence_threshold:
             return FabricationResult()
 
+        # Cycle through varied deflections instead of the same one every time
+        deflection = _DEFLECTION_POOL[self._deflection_idx % len(_DEFLECTION_POOL)]
+        self._deflection_idx += 1
+
         return FabricationResult(
             is_fabrication=True,
             category=", ".join(sorted(categories)),
             confidence=max_confidence,
             matches=matches,
-            replacement=DEFAULT_DEFLECTION,
+            replacement=deflection,
         )

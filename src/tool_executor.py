@@ -109,6 +109,77 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "send_message",
+            "description": (
+                "Send a WhatsApp message (text, image, PDF, or video) to a specific contact. "
+                "Use when the user asks you to send something to someone, message a contact, "
+                "or forward content to a phone number. You can send plain text, or generate "
+                "and send media in one step."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "phone_number": {
+                        "type": "string",
+                        "description": "Phone number with country code, digits only (e.g. '919996126890' or '85292893658').",
+                    },
+                    "text": {
+                        "type": "string",
+                        "description": "Text message to send. Optional if sending media.",
+                    },
+                    "media_type": {
+                        "type": "string",
+                        "description": "Type of media to generate and send. Omit for text-only messages.",
+                        "enum": ["image", "pdf", "video"],
+                    },
+                    "media_prompt": {
+                        "type": "string",
+                        "description": "Prompt/content for media generation. Required if media_type is set. For image: description to generate. For pdf: document content. For video: video description.",
+                    },
+                    "media_title": {
+                        "type": "string",
+                        "description": "Title for PDF documents. Only used when media_type is 'pdf'.",
+                    },
+                },
+                "required": ["phone_number"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "ask_owner",
+            "description": (
+                "Ask the phone owner (admin) a question when you don't know the answer to something. "
+                "Use this when someone asks about specific details you don't have (project info, plans, "
+                "events, personal details), or when you need permission to share sensitive information. "
+                "The owner will receive the question on WhatsApp and can reply with /respond. "
+                "While waiting, give the contact a natural deflection like 'lemme check on that'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question to ask the owner. Be specific about what the contact is asking and who is asking.",
+                    },
+                    "contact_name": {
+                        "type": "string",
+                        "description": "Name or identifier of the contact who is asking.",
+                    },
+                    "urgency": {
+                        "type": "string",
+                        "description": "How urgent is this question.",
+                        "enum": ["low", "normal", "high"],
+                    },
+                },
+                "required": ["question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "web_search",
             "description": (
                 "Search the web for current information. "
@@ -157,9 +228,11 @@ class ToolExecutor:
     MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB WhatsApp limit
     VIDEO_TIMEOUT = 300  # 5 minutes max for video generation
 
-    def __init__(self, config: dict[str, Any], client: "httpx.AsyncClient | None" = None):
+    def __init__(self, config: dict[str, Any], client: "httpx.AsyncClient | None" = None, channel=None, escalation=None):
         self.config = config
         self._client = client
+        self._channel = channel  # WhatsAppChannel for send_message tool
+        self._escalation = escalation  # EscalationEngine for ask_owner tool
         self.MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
     async def execute(self, tool_name: str, arguments: dict[str, Any]) -> ToolResult:
@@ -171,6 +244,8 @@ class ToolExecutor:
             "generate_image": self._generate_image,
             "generate_video": self._generate_video,
             "create_pdf": self._create_pdf,
+            "send_message": self._send_message,
+            "ask_owner": self._ask_owner,
             "web_search": self._web_search,
         }
 
@@ -395,6 +470,116 @@ class ToolExecutor:
         except Exception as e:
             filepath.unlink(missing_ok=True)
             return ToolResult(False, "create_pdf", f"PDF creation failed: {type(e).__name__}")
+
+    # ── Send Message to Contact ──
+
+    async def _send_message(self, args: dict[str, Any]) -> ToolResult:
+        """Send a text message and/or generated media to a specific WhatsApp contact."""
+        if not self._channel:
+            return ToolResult(False, "send_message", "WhatsApp channel not available")
+
+        phone = "".join(c for c in args.get("phone_number", "") if c.isdigit())
+        if not phone or len(phone) < 7:
+            return ToolResult(False, "send_message", "Invalid phone number")
+
+        # Security: only allow sending to contacts in the allowlist (if configured)
+        allowlist = self.config.get("allowlist", [])
+        admin_number = self.config.get("admin_number", "")
+        if allowlist and phone not in allowlist and phone != admin_number:
+            return ToolResult(False, "send_message", f"Cannot send to {phone}: not in allowlist")
+
+        chat_jid = f"{phone}@s.whatsapp.net"
+        text = args.get("text", "").strip()
+        media_type = args.get("media_type", "")
+        media_prompt = args.get("media_prompt", "").strip()
+        media_title = args.get("media_title", "Document")
+
+        sent_items = []
+
+        # Generate and send media if requested
+        if media_type and media_prompt:
+            if media_type == "image":
+                media_result = await self._generate_image({"prompt": media_prompt})
+            elif media_type == "pdf":
+                media_result = await self._create_pdf({"title": media_title, "content": media_prompt})
+            elif media_type == "video":
+                media_result = await self._generate_video({"prompt": media_prompt})
+            else:
+                return ToolResult(False, "send_message", f"Unknown media_type: {media_type}")
+
+            if not media_result.success:
+                return ToolResult(False, "send_message", f"Media generation failed: {media_result.content}")
+
+            if media_result.media_path:
+                try:
+                    await self._channel.send_media(chat_jid, media_result.media_path)
+                    sent_items.append(f"{media_type} sent")
+                except Exception as e:
+                    return ToolResult(False, "send_message", f"Failed to send media: {type(e).__name__}")
+
+        # Send text message if provided
+        if text:
+            try:
+                await self._channel.send_text(chat_jid, text)
+                sent_items.append("text sent")
+            except Exception as e:
+                return ToolResult(False, "send_message", f"Failed to send text: {type(e).__name__}")
+
+        if not sent_items:
+            return ToolResult(False, "send_message", "Nothing to send - provide text and/or media_type+media_prompt")
+
+        summary = f"Sent to {phone}: {', '.join(sent_items)}"
+        return ToolResult(True, "send_message", summary)
+
+    # ── Ask Owner (escalation to admin) ──
+
+    async def _ask_owner(self, args: dict[str, Any]) -> ToolResult:
+        """Escalate a question to the phone owner (admin) via WhatsApp.
+
+        Uses the EscalationEngine to create a tracked escalation record,
+        then sends the question to the admin's WhatsApp. The admin can
+        reply with /respond ESC-XXX <answer> to route the answer back.
+        """
+        if not self._escalation:
+            return ToolResult(False, "ask_owner", "Escalation system not available")
+        if not self._channel:
+            return ToolResult(False, "ask_owner", "WhatsApp channel not available")
+
+        question = args.get("question", "").strip()
+        if not question:
+            return ToolResult(False, "ask_owner", "No question provided")
+
+        contact_name = args.get("contact_name", "unknown contact")
+        urgency = args.get("urgency", "normal")
+
+        admin_number = self.config.get("admin_number", "")
+        if not admin_number:
+            return ToolResult(False, "ask_owner", "No admin number configured")
+
+        # Create escalation record
+        code, admin_msg = self._escalation.escalate(
+            sender_id=contact_name,
+            sender_name=contact_name,
+            question=question,
+            context=f"urgency: {urgency}",
+        )
+
+        # Send to admin via WhatsApp
+        admin_jid = f"{admin_number}@s.whatsapp.net"
+        try:
+            await self._channel.send_text(admin_jid, admin_msg)
+        except Exception as e:
+            return ToolResult(False, "ask_owner", f"Failed to reach owner: {type(e).__name__}")
+
+        return ToolResult(
+            success=True,
+            tool_name="ask_owner",
+            content=(
+                f"Question forwarded to owner [{code}]. "
+                f"Tell the contact you'll check and get back to them. "
+                f"Do NOT make up an answer — wait for the owner's response."
+            ),
+        )
 
     # ── Web Search (placeholder) ──
 
