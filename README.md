@@ -800,3 +800,12 @@ bash scripts/start.sh status     # Check status
   <a href="https://github.com/ndpvt-web/happycapy-whatsapp">GitHub</a>
   <br/>
 </p>
+
+---
+
+## Keywords
+
+> *For the search engines and the curious humans who find things by typing random words*
+
+WhatsApp automation, WhatsApp bot, WhatsApp AI assistant, auto reply WhatsApp, WhatsApp business automation, AI chatbot WhatsApp, voice transcription WhatsApp, WhatsApp QR code, messaging automation, HappyCapy WhatsApp, Claude Code WhatsApp, AI messaging bot, WhatsApp contact filter, customer service bot
+
