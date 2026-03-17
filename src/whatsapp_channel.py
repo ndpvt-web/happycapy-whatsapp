@@ -206,6 +206,8 @@ class WhatsAppChannel:
         # Logs warning if weak signals remain after 3 regex layers.
         if self._LEAK_DETECTOR_RE.search(text):
             print("[warning] Possible reasoning leak detected in outbound message (post-filter)")
+        # Convert Markdown to WhatsApp formatting (Issue 4)
+        text = self._convert_markdown_to_whatsapp(text)
         max_len = self.config.get("max_message_length", 4000)
         chunks = self._split_message(text, max_len) if len(text) > max_len else [text]
 
@@ -224,6 +226,8 @@ class WhatsAppChannel:
             return
 
         text = self._strip_reasoning(text)
+        # Convert Markdown to WhatsApp formatting (Issue 4)
+        text = self._convert_markdown_to_whatsapp(text)
         max_len = self.config.get("max_message_length", 4000)
         chunks = self._split_message(text, max_len) if len(text) > max_len else [text]
 
@@ -579,6 +583,28 @@ class WhatsAppChannel:
         except Exception as e:
             print(f"Failed to save media: {e}")
             return None
+
+    @staticmethod
+    def _convert_markdown_to_whatsapp(text: str) -> str:
+        """Convert Markdown formatting to WhatsApp formatting.
+
+        Markdown -> WhatsApp conversions:
+        - **bold** or __bold__ -> *bold* (WhatsApp uses single asterisk)
+        - ~~strike~~ -> ~strike~ (single tilde)
+        - ### Header -> *Header* (headers to bold)
+        - Keep _italic_ as-is (same in both)
+        - Remove language tags from code fences (```python -> ```)
+        """
+        # Headers -> bold (must come before bold conversion to avoid double processing)
+        text = re.sub(r'^#{1,6}\s+(.+)$', r'*\1*', text, flags=re.MULTILINE)
+        # **bold** or __bold__ -> *bold*
+        text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
+        text = re.sub(r'__(.+?)__', r'*\1*', text)
+        # ~~strike~~ -> ~strike~
+        text = re.sub(r'~~(.+?)~~', r'~\1~', text)
+        # Remove language tags from code fences: ```python -> ```
+        text = re.sub(r'```\w+', '```', text)
+        return text
 
     @classmethod
     def _strip_reasoning(cls, text: str) -> str:

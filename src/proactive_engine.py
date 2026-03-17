@@ -152,6 +152,20 @@ CREATE TABLE IF NOT EXISTS exam_calendar (
     created_at TEXT DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS exam_timetable (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    board TEXT NOT NULL,
+    class TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    exam_date TEXT NOT NULL,
+    year INTEGER NOT NULL,
+    is_practical INTEGER DEFAULT 0,
+    notes TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_exam_timetable_board_class ON exam_timetable(board, class);
+CREATE INDEX IF NOT EXISTS idx_exam_timetable_date ON exam_timetable(exam_date);
+
 -- GAP 1: Cognitive Model -- per-concept spaced repetition (SM-2)
 CREATE TABLE IF NOT EXISTS concept_mastery (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -225,6 +239,7 @@ class ProactiveEngine:
                 print(f"[proactive] Migrated: added {col} column")
         self._conn.commit()
         self.seed_exam_calendar()
+        self._seed_exam_data()
         print(f"[proactive] Database initialized at {db_path}")
 
     # ── Plan CRUD ──
@@ -323,8 +338,8 @@ class ProactiveEngine:
                 "\n--- Study Plan Status ---\n"
                 "This student has NO study plan yet. They are a new/unregistered student.\n"
                 "MISSING INFO (ask naturally during conversation):\n"
-                "  - Board (FBISE, Punjab, Sindh, KPK, etc.)\n"
-                "  - Class (9th, 10th, 11th, 12th)\n"
+                "  - Board (FBISE only - this is the ONLY board supported)\n"
+                "  - Class (Grade 9 or Grade 10 ONLY - also called SSC-I and SSC-II. These are the ONLY 2 classes supported)\n"
                 "  - Exam date (approximate)\n"
                 "  - Focus subjects\n"
                 "  - Preferred study time\n"
@@ -339,7 +354,7 @@ class ProactiveEngine:
         if plan.get("board"):
             known.append("Board: " + plan["board"])
         else:
-            missing.append("Board (FBISE, Punjab, Sindh, KPK, etc.)")
+            missing.append("Board (FBISE only)")
 
         if plan.get("class"):
             known.append("Class: " + plan["class"])
@@ -410,6 +425,8 @@ class ProactiveEngine:
         if features_off:
             parts.append("Disabled features: " + ", ".join(features_off))
 
+        # Add system-level context about supported boards/classes
+        parts.append("SYSTEM CONTEXT: Only FBISE board is supported. Only Grade 9 (SSC-I) and Grade 10 (SSC-II) are supported.")
         parts.append("Use update_study_plan/set_study_reminder/log_study_progress tools to save info.")
         parts.append("--- End Study Plan Status ---")
         return "\n".join(parts)
@@ -575,6 +592,40 @@ class ProactiveEngine:
             "SELECT COUNT(*) as cnt FROM concept_mastery WHERE jid=?", (jid,),
         ).fetchone()
         return row["cnt"] if row else 0
+
+    def get_next_exam(self, class_name: str) -> Optional[dict]:
+        """Get the next upcoming exam for the student's class.
+
+        Args:
+            class_name: Student's class (e.g., "Grade 9", "Grade 10")
+
+        Returns:
+            dict with keys: subject, date, days_left (or None if no upcoming exams)
+        """
+        today = datetime.now().strftime("%Y-%m-%d")
+        row = self._conn.execute(
+            """SELECT subject, exam_date
+               FROM exam_timetable
+               WHERE board='FBISE' AND class=? AND exam_date >= ?
+               ORDER BY exam_date ASC
+               LIMIT 1""",
+            (class_name, today),
+        ).fetchone()
+
+        if not row:
+            return None
+
+        exam_date = row["exam_date"]
+        try:
+            exam_dt = datetime.strptime(exam_date, "%Y-%m-%d")
+            days_left = (exam_dt - datetime.now()).days
+            return {
+                "subject": row["subject"],
+                "date": exam_date,
+                "days_left": days_left,
+            }
+        except (ValueError, TypeError):
+            return None
 
     # ── GAP 2: Affective Model ──
 
@@ -1028,17 +1079,13 @@ class ProactiveEngine:
                     return "celebration_specific"
 
         # ── P9: COUNTDOWN ──
-        if plan.get("countdown_enabled", 1) and today_weekday == 6:
-            exam_date = plan.get("exam_date", "")
-            if exam_date:
-                try:
-                    exam_dt = datetime.strptime(exam_date, "%Y-%m-%d")
-                    days_left = (exam_dt - datetime.now()).days
-                    if 1 <= days_left <= 90:
-                        if not self._sent_today(jid, "countdown", today_str):
-                            return "countdown"
-                except (ValueError, TypeError):
-                    pass
+        if plan.get("countdown_enabled", 1):
+            class_name = plan.get("class", "")
+            if class_name in ("Grade 9", "Grade 10"):
+                next_exam = self.get_next_exam(class_name)
+                if next_exam and next_exam["days_left"] <= 7:
+                    if not self._sent_today(jid, "countdown", today_str):
+                        return "countdown"
 
         # ── P10: ACHIEVEMENT ──
         if streak in ACHIEVEMENT_MILESTONES:
@@ -1080,7 +1127,28 @@ class ProactiveEngine:
         streak = plan.get("current_streak", 0)
         exam_date = plan.get("exam_date", "")
         days_left = ""
-        if exam_date:
+        exam_schedule = ""
+
+        # Enhanced countdown context with exam timetable
+        if message_type == "countdown":
+            class_name = plan.get("class", "")
+            if class_name in ("Grade 9", "Grade 10"):
+                next_exam = self.get_next_exam(class_name)
+                if next_exam:
+                    days_left = f"{next_exam['days_left']} days until {next_exam['subject']} exam ({next_exam['date']})"
+
+                    # Get all remaining exams for full schedule
+                    today = datetime.now().strftime("%Y-%m-%d")
+                    remaining_exams = self._conn.execute(
+                        """SELECT subject, exam_date FROM exam_timetable
+                           WHERE board='FBISE' AND class=? AND exam_date >= ?
+                           ORDER BY exam_date ASC""",
+                        (class_name, today),
+                    ).fetchall()
+                    if remaining_exams:
+                        schedule_lines = [f"  {row['exam_date']}: {row['subject']}" for row in remaining_exams[:5]]
+                        exam_schedule = "Remaining exam schedule:\n" + "\n".join(schedule_lines)
+        elif exam_date:
             try:
                 exam_dt = datetime.strptime(exam_date, "%Y-%m-%d")
                 dl = (exam_dt - datetime.now()).days
@@ -1158,6 +1226,8 @@ class ProactiveEngine:
         )
         if days_left:
             prompt += f"Exam countdown: {days_left}\n"
+        if exam_schedule:
+            prompt += f"\n{exam_schedule}\n"
         if today_plan:
             prompt += f"Today's plan: {today_plan}\n"
 
@@ -1544,6 +1614,50 @@ class ProactiveEngine:
         self._conn.commit()
         print(f"[proactive] Seeded {len(entries)} exam calendar entries")
 
+    def _seed_exam_data(self):
+        """Seed exam_timetable with FBISE SSC 2026 exam dates if empty (idempotent)."""
+        existing = self._conn.execute(
+            "SELECT COUNT(*) as cnt FROM exam_timetable WHERE board='FBISE' AND year=2026"
+        ).fetchone()
+        if existing["cnt"] > 0:
+            return
+
+        # SSC-I (Grade 9) exam dates (board, class, exam_date, subject, is_practical)
+        ssc1_exams = [
+            ("FBISE", "Grade 9", "2026-04-01", "Math", 0),
+            ("FBISE", "Grade 9", "2026-04-04", "Tarjuma Quran", 0),
+            ("FBISE", "Grade 9", "2026-04-10", "Chemistry", 0),
+            ("FBISE", "Grade 9", "2026-04-13", "English", 0),
+            ("FBISE", "Grade 9", "2026-04-16", "Urdu", 0),
+            ("FBISE", "Grade 9", "2026-04-20", "Islamiat", 0),
+            ("FBISE", "Grade 9", "2026-04-24", "Physics", 0),
+            ("FBISE", "Grade 9", "2026-04-29", "Bio/Computer", 0),
+        ]
+
+        # SSC-II (Grade 10) exam dates
+        ssc2_exams = [
+            ("FBISE", "Grade 10", "2026-03-31", "Physics", 0),
+            ("FBISE", "Grade 10", "2026-04-03", "Islamiat", 0),
+            ("FBISE", "Grade 10", "2026-04-06", "English", 0),
+            ("FBISE", "Grade 10", "2026-04-09", "Urdu", 0),
+            ("FBISE", "Grade 10", "2026-04-11", "Pak Studies", 0),
+            ("FBISE", "Grade 10", "2026-04-15", "Bio/Computer", 0),
+            ("FBISE", "Grade 10", "2026-04-18", "Bio/Comp (Practical)", 1),
+            ("FBISE", "Grade 10", "2026-04-21", "Chemistry", 0),
+            ("FBISE", "Grade 10", "2026-04-23", "Chemistry (Practical)", 1),
+            ("FBISE", "Grade 10", "2026-04-27", "Math", 0),
+            ("FBISE", "Grade 10", "2026-04-30", "Physics (Practical)", 1),
+        ]
+
+        all_exams = ssc1_exams + ssc2_exams
+        for board, cls, exam_date, subject, is_practical in all_exams:
+            self._conn.execute(
+                "INSERT INTO exam_timetable (board, class, exam_date, subject, is_practical, year) VALUES (?, ?, ?, ?, ?, ?)",
+                (board, cls, exam_date, subject, is_practical, 2026),
+            )
+        self._conn.commit()
+        print(f"[proactive] Seeded {len(all_exams)} exam timetable entries for FBISE SSC 2026")
+
 
 # ── Tool Definitions ──
 
@@ -1586,17 +1700,19 @@ PROACTIVE_TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "update_study_plan",
-            "description": "Update a student's study plan with exam info, subjects, and schedule. Use when a student shares their board, class, exam date, or subjects.",
+            "description": "Update a student's study plan with exam info, subjects, and schedule. Use when a student shares their board, class, exam date, or subjects. NOTE: Only FBISE board is supported, and only Grade 9 (SSC-I) and Grade 10 (SSC-II) classes.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "board": {
                         "type": "string",
-                        "description": "Education board (FBISE, Punjab, Sindh, KPK)",
+                        "description": "Education board (must be FBISE)",
+                        "enum": ["FBISE"],
                     },
                     "class_name": {
                         "type": "string",
-                        "description": "Class/grade (9th, 10th, 11th, 12th)",
+                        "description": "Class/grade (Grade 9 for SSC-I or Grade 10 for SSC-II only)",
+                        "enum": ["Grade 9", "Grade 10"],
                     },
                     "exam_date": {
                         "type": "string",

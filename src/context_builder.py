@@ -233,7 +233,11 @@ class ContextBuilder:
             "1) Wrap your ENTIRE response in <reply>...</reply> tags. ONLY content inside <reply> tags will be sent. "
             "Put any thinking or reasoning OUTSIDE the tags — it will be discarded. "
             "2) Your <reply> goes directly to a WhatsApp contact as if the owner typed it. Only include the final message. "
-            "3) Keep replies brief and human-like. Match the contact's texting style."
+            "3) Keep replies brief and human-like. Match the contact's texting style. "
+            "4) WhatsApp formatting: Use *bold* (single asterisk), _italic_, ~strikethrough~, ```monospace```. "
+            "NEVER use **double asterisks** for bold (that's Markdown, not WhatsApp). "
+            "NEVER use ## headers (WhatsApp doesn't support headers). Use *bold text* instead. "
+            "Keep responses concise and WhatsApp-native. 1-3 short paragraphs max."
         )
 
     def build_system_prompt(

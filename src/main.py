@@ -744,6 +744,10 @@ class WhatsAppOrchestrator:
                 # Don't process further -- admin's direct chat message goes to the contact as-is
                 return
 
+        # Auto-enroll students from Grade 9/10 groups (for proactive system)
+        if self.proactive and chat_id.endswith("@g.us"):
+            self._auto_enroll_student(sender_id, chat_id, metadata)
+
         # ── Intelligence layer: score, queue, audit (T_SCOREPLUGIN, T_QUEUEFIRST, T_AUDITALL) ──
         score, reasons = (5, [])
         queue_id = None
@@ -1350,6 +1354,69 @@ class WhatsAppOrchestrator:
                 print(f"[reflection] Expired {expired} old lessons")
         except Exception as e:
             print(f"[reflection] Self-reflection error: {e}")
+
+    def _auto_enroll_student(self, sender_id: str, chat_id: str, metadata: dict) -> None:
+        """Auto-create student plan from group membership. Idempotent.
+
+        When a message comes from a WhatsApp group with "Grade 9" or "Grade 10"
+        in the name, automatically enroll the sender as a student with default settings.
+        """
+        if not self.proactive:
+            return
+
+        # Get group name from metadata or contact store
+        group_name = metadata.get("group_name", "") or metadata.get("pushName", "")
+        if not group_name and self.contact_store:
+            # Try to get from contact store
+            try:
+                group_card = self.contact_store.get_group_card(chat_id)
+                if group_card:
+                    group_name = group_card.get("group_name", "")
+            except Exception:
+                pass
+
+        if not group_name:
+            return  # Can't determine group name
+
+        # Detect grade from group name
+        grade = None
+        group_lower = group_name.lower()
+        if "grade 9" in group_lower or "9th" in group_lower or "ssc-i" in group_lower or "ssc i" in group_lower:
+            grade = "Grade 9"
+        elif "grade 10" in group_lower or "10th" in group_lower or "ssc-ii" in group_lower or "ssc ii" in group_lower:
+            grade = "Grade 10"
+
+        if not grade:
+            return  # Not a grade group, skip
+
+        # Normalize sender_id to full JID
+        jid = sender_id if "@" in sender_id else f"{sender_id}@s.whatsapp.net"
+
+        # Check if student plan already exists (idempotent check)
+        existing = self.proactive.get_plan(jid)
+        if existing:
+            return  # Already enrolled
+
+        # Get student display name from metadata
+        display_name = metadata.get("sender_name", "") or metadata.get("pushName", "")
+        if not display_name and self.contact_store:
+            display_name = self.contact_store.get_contact_name(sender_id)
+
+        # Auto-create student plan with defaults
+        exam_date = "2026-04-01" if grade == "Grade 9" else "2026-03-31"  # First exam date
+        try:
+            self.proactive.create_plan(
+                jid=jid,
+                display_name=display_name or jid,
+                board="FBISE",
+                class_=grade,
+                exam_date=exam_date,
+                study_time="20:00",  # Default 8pm study time
+                timezone="Asia/Karachi",
+            )
+            print(f"[auto-enroll] Enrolled {display_name or jid} as {grade} (FBISE) from group '{group_name}'")
+        except Exception as e:
+            print(f"[auto-enroll] Failed to enroll {display_name or jid}: {e}")
 
     async def _handle_admin_command(self, chat_id: str, command: str, metadata: dict | None = None) -> None:
         """Handle an admin slash command via WhatsApp (Theorem T_ADMCMD).
