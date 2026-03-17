@@ -191,6 +191,9 @@ export class BridgeServer {
     } else if (cmd.type === 'presence' && this.wa) {
       await this.wa.sendPresenceUpdate(cmd.jid, cmd.presenceType || 'composing');
       return { presence: true };
+    } else if (cmd.type === 'get_groups' && this.wa) {
+      const groups = await this.wa.getGroups();
+      return { groups };
     }
     return {};
   }

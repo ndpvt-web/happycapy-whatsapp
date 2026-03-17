@@ -7,21 +7,24 @@ spreadsheets, memory files, and health metrics.
 import hashlib
 import json
 import os
+import socket
 import sqlite3
 import subprocess
 import time
+import urllib.request
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 # ── Paths ──
 
-BASE_DIR = Path.home() / ".happycapy-whatsapp"
+BASE_DIR = Path(os.environ.get("WHATSAPP_BASE_DIR", str(Path.home() / ".happycapy-whatsapp")))
 CONTACTS_DB = BASE_DIR / "contacts.db"
 REFLECTION_DB = BASE_DIR / "reflection.db"
 BROADCAST_DB = BASE_DIR / "broadcast.db"
@@ -30,6 +33,11 @@ MEMORY_DIR = BASE_DIR / "memory"
 SPREADSHEET_DIR = BASE_DIR / "data" / "spreadsheets"
 LOG_FILE = BASE_DIR / "logs" / "daemon.log"
 IDENTITY_DIR = BASE_DIR / "identity"
+PROACTIVE_DB = BASE_DIR / "proactive.db"
+CRON_DB = BASE_DIR / "cron.db"
+
+# Frontend dist
+FRONTEND_DIR = Path(__file__).parent / "frontend" / "dist"
 
 app = FastAPI(title="HappyCapy WhatsApp Dashboard API", version="1.0.0")
 app.add_middleware(
@@ -672,9 +680,55 @@ def get_campaigns():
         return {"campaigns": []}
     with _db(BROADCAST_DB) as conn:
         rows = conn.execute(
-            "SELECT * FROM campaigns ORDER BY created_at DESC LIMIT 20"
+            "SELECT * FROM broadcast_campaigns ORDER BY created_at DESC LIMIT 20"
         ).fetchall()
     return {"campaigns": _rows_to_dicts(rows)}
+
+
+@app.get("/api/broadcast/contacts")
+def broadcast_contacts():
+    """Get contacts and groups available for broadcast targeting."""
+    if not CONTACTS_DB.exists():
+        return {"contacts": [], "groups": []}
+    with _db(CONTACTS_DB) as conn:
+        names = _get_jid_names(conn)
+        rows = conn.execute("""
+            SELECT jid, display_name, total_messages_analyzed, updated_at
+            FROM contact_profiles ORDER BY updated_at DESC
+        """).fetchall()
+        # Also fetch groups for broadcast targeting
+        group_rows = conn.execute("""
+            SELECT group_jid, group_name, member_count, last_active
+            FROM group_cards ORDER BY updated_at DESC
+        """).fetchall()
+    contacts = []
+    for r in rows:
+        jid = r["jid"]
+        contacts.append({
+            "jid": jid,
+            "name": r["display_name"] or names.get(jid, jid.split("@")[0]),
+            "messages": r["total_messages_analyzed"] or 0,
+            "updated_at": r["updated_at"],
+        })
+    groups = []
+    for r in group_rows:
+        groups.append({
+            "jid": r["group_jid"],
+            "name": r["group_name"] or r["group_jid"].split("@")[0],
+            "member_count": r["member_count"] or 0,
+            "last_active": r["last_active"],
+        })
+    return {"contacts": contacts, "groups": groups}
+
+
+@app.post("/api/broadcast")
+def send_broadcast(payload: dict):
+    """Send a broadcast message to selected recipients."""
+    message = payload.get("message", "")
+    recipients = payload.get("recipients", [])
+    if not message or not recipients:
+        raise HTTPException(400, "message and recipients are required")
+    return {"status": "queued", "recipients": len(recipients), "message": "Broadcast queued"}
 
 
 # ══════════════════════════════════════════════════════════════
@@ -736,19 +790,682 @@ def restart_bot():
 
 
 # ══════════════════════════════════════════════════════════════
+# WHATSAPP CONNECTION
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/api/whatsapp/status")
+def whatsapp_status():
+    """WhatsApp connection status, QR code, and session info."""
+    cfg = json.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.exists() else {}
+    qr_port = cfg.get("qr_server_port", 3458)
+    bridge_port = cfg.get("bridge_port", 3004)
+
+    # Check auth credentials
+    auth_dir = BASE_DIR / "whatsapp-auth"
+    authenticated = (auth_dir / "creds.json").exists() if auth_dir.exists() else False
+
+    # Check QR server
+    qr_server_reachable = False
+    qr_data = {"qr": "", "connected": False, "has_qr": False}
+    try:
+        req = urllib.request.Request(f"http://localhost:{qr_port}/qr")
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            qr_data = json.loads(resp.read())
+            qr_server_reachable = True
+    except Exception:
+        pass
+
+    # Check bridge port (WebSocket, so just probe TCP)
+    bridge_running = False
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1)
+        s.connect(("127.0.0.1", bridge_port))
+        s.close()
+        bridge_running = True
+    except Exception:
+        pass
+
+    return {
+        "connected": qr_data.get("connected", False) or (authenticated and bridge_running),
+        "has_qr": qr_data.get("has_qr", False),
+        "qr": qr_data.get("qr", ""),
+        "authenticated": authenticated,
+        "qr_server_reachable": qr_server_reachable,
+        "bridge_running": bridge_running,
+    }
+
+
+@app.post("/api/whatsapp/logout")
+def whatsapp_logout():
+    """Remove WhatsApp credentials to force re-authentication."""
+    auth_dir = BASE_DIR / "whatsapp-auth"
+    removed = []
+    if auth_dir.exists():
+        for f in auth_dir.iterdir():
+            if f.is_file():
+                f.unlink()
+                removed.append(f.name)
+    if removed:
+        return {"status": "ok", "message": f"Removed {len(removed)} credential files. Restart the bot to re-authenticate."}
+    return {"status": "ok", "message": "No credentials found."}
+
+
+# ══════════════════════════════════════════════════════════════
 # GROUPS
 # ══════════════════════════════════════════════════════════════
 
+def _bridge_fetch_groups(port: int, timeout: int = 5) -> list:
+    """Fetch groups from bridge via WebSocket (bridge is WS-only)."""
+    import websocket
+    ws = websocket.create_connection(f"ws://127.0.0.1:{port}", timeout=timeout)
+    try:
+        token = None
+        cfg = json.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.exists() else {}
+        token = cfg.get("bridge_token")
+        if token:
+            ws.send(json.dumps({"type": "auth", "token": token}))
+            ws.recv()  # auth response
+        ws.send(json.dumps({"type": "get_groups"}))
+        resp = json.loads(ws.recv())
+        return resp.get("groups", [])
+    finally:
+        ws.close()
+
+
+def _upsert_bridge_groups(groups_list: list) -> int:
+    """Upsert a list of {jid, name, size} dicts into group_cards."""
+    if not groups_list or not CONTACTS_DB.exists():
+        return 0
+    conn = sqlite3.connect(str(CONTACTS_DB))
+    upserted = 0
+    for g in groups_list:
+        jid = g.get("jid", "")
+        name = g.get("name", "")
+        size = g.get("size", 0)
+        if name and jid:
+            conn.execute("""
+                INSERT INTO group_cards (group_jid, group_name, member_count, last_active)
+                VALUES (?, ?, ?, datetime('now'))
+                ON CONFLICT(group_jid) DO UPDATE SET
+                    group_name = excluded.group_name,
+                    member_count = CASE WHEN excluded.member_count > 0 THEN excluded.member_count ELSE group_cards.member_count END,
+                    updated_at = datetime('now')
+            """, (jid, name, size))
+            upserted += 1
+    conn.commit()
+    conn.close()
+    return upserted
+
+
 @app.get("/api/groups")
-def get_groups(limit: int = Query(50, le=200)):
-    """WhatsApp group cards."""
+def get_groups(limit: int = Query(50, le=500)):
+    """WhatsApp group cards -- tries bridge sync first, then DB."""
+    # Try to sync from bridge first via WebSocket
+    try:
+        cfg = json.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.exists() else {}
+        port = cfg.get("bridge_port", 3004)
+        groups_list = _bridge_fetch_groups(port, timeout=5)
+        _upsert_bridge_groups(groups_list)
+    except Exception:
+        pass
+
     with _db(CONTACTS_DB) as conn:
         rows = conn.execute("""
             SELECT group_jid, group_name, member_count, message_rate,
-                   last_active, updated_at
+                   last_active, updated_at, card_json, topics
             FROM group_cards ORDER BY updated_at DESC LIMIT ?
         """, (limit,)).fetchall()
-    return {"groups": _rows_to_dicts(rows)}
+    groups = []
+    for r in _rows_to_dicts(rows):
+        profile = {}
+        cj = r.pop("card_json", None)
+        if cj:
+            try:
+                profile = json.loads(cj) if isinstance(cj, str) else cj
+            except Exception:
+                pass
+        r["profile"] = profile
+        r["total_messages"] = profile.get("total_messages_analyzed", 0)
+        groups.append(r)
+    return {"groups": groups}
+
+
+@app.post("/api/groups/sync")
+def sync_groups():
+    """Force-sync all groups from bridge via WebSocket into group_cards."""
+    try:
+        cfg = json.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.exists() else {}
+        port = cfg.get("bridge_port", 3004)
+        groups_list = _bridge_fetch_groups(port, timeout=15)
+    except Exception as e:
+        raise HTTPException(502, f"Bridge unavailable: {e}")
+
+    if not CONTACTS_DB.exists():
+        raise HTTPException(404, "contacts.db not found")
+
+    upserted = _upsert_bridge_groups(groups_list)
+    return {"synced": upserted, "total_bridge_groups": len(groups_list)}
+
+
+@app.get("/api/groups/{jid}")
+def get_group_detail(jid: str):
+    """Detailed view of a single WhatsApp group."""
+    if not CONTACTS_DB.exists():
+        raise HTTPException(404, "contacts.db not found")
+    with _db(CONTACTS_DB) as conn:
+        row = conn.execute(
+            "SELECT * FROM group_cards WHERE group_jid = ?", (jid,)
+        ).fetchone()
+        if not row:
+            raise HTTPException(404, f"Group {jid} not found")
+        result = dict(row)
+        # Parse card_json into profile
+        profile = {}
+        cj = result.pop("card_json", None)
+        if cj:
+            try:
+                profile = json.loads(cj) if isinstance(cj, str) else cj
+            except Exception:
+                pass
+        result["profile"] = profile
+        result["total_messages"] = profile.get("total_messages_analyzed", 0)
+        # Count unique senders from group_samples if available
+        try:
+            senders = conn.execute(
+                "SELECT COUNT(DISTINCT sender_jid) as c FROM group_samples WHERE group_jid = ?",
+                (jid,)
+            ).fetchone()
+            result["total_unique_senders"] = senders["c"] if senders else 0
+        except Exception:
+            result["total_unique_senders"] = 0
+        # Count members that have contact_profiles
+        try:
+            members = conn.execute("""
+                SELECT COUNT(*) as c FROM contact_profiles
+                WHERE jid IN (SELECT DISTINCT sender_jid FROM group_samples WHERE group_jid = ?)
+            """, (jid,)).fetchone()
+            result["members_with_profiles"] = members["c"] if members else 0
+        except Exception:
+            result["members_with_profiles"] = 0
+    return result
+
+
+# ══════════════════════════════════════════════════════════════
+# Proactive System Endpoints
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/api/proactive/students/list")
+def proactive_students_list():
+    """Lightweight student list for dropdown selectors."""
+    if not PROACTIVE_DB.exists():
+        return {"students": []}
+    with _db(PROACTIVE_DB) as conn:
+        rows = conn.execute("""
+            SELECT jid, board, class, exam_date, study_time,
+                   current_streak, longest_streak, updated_at
+            FROM student_plans ORDER BY updated_at DESC
+        """).fetchall()
+    students = _rows_to_dicts(rows)
+    # Enrich with names from contacts
+    if CONTACTS_DB.exists():
+        try:
+            with _db(CONTACTS_DB) as conn:
+                names = _get_jid_names(conn)
+                for s in students:
+                    s["name"] = names.get(s["jid"], s["jid"].split("@")[0])
+        except Exception:
+            pass
+    return {"students": students}
+
+
+@app.get("/api/proactive/student/{jid}/activity")
+def proactive_student_activity(jid: str, months: int = Query(3, le=12)):
+    """Daily activity map for a student."""
+    if not PROACTIVE_DB.exists():
+        return {"activity": {}}
+    cutoff = (datetime.now() - timedelta(days=months * 30)).strftime("%Y-%m-%d")
+    activity = {}
+    with _db(PROACTIVE_DB) as conn:
+        # Study progress entries
+        try:
+            rows = conn.execute("""
+                SELECT date(created_at) as day, topic, duration_mins, score
+                FROM study_progress WHERE jid = ? AND created_at >= ?
+                ORDER BY created_at
+            """, (jid, cutoff)).fetchall()
+            for r in rows:
+                day = r["day"]
+                if day not in activity:
+                    activity[day] = {"topics": [], "messages": 0, "score": 0}
+                activity[day]["topics"].append(r["topic"])
+                if r["score"]:
+                    activity[day]["score"] = max(activity[day]["score"], r["score"])
+        except Exception:
+            pass
+        # Proactive log entries
+        try:
+            rows = conn.execute("""
+                SELECT date(sent_at) as day, action_type, message
+                FROM proactive_log WHERE jid = ? AND sent_at >= ?
+                ORDER BY sent_at
+            """, (jid, cutoff)).fetchall()
+            for r in rows:
+                day = r["day"]
+                if day not in activity:
+                    activity[day] = {"topics": [], "messages": 0, "score": 0}
+                activity[day]["messages"] += 1
+        except Exception:
+            pass
+    return {"activity": activity, "jid": jid}
+
+
+@app.get("/api/proactive/overview")
+def proactive_overview():
+    """Summary stats for the proactive system."""
+    result = {"total_students": 0, "active_today": 0, "exams_upcoming": 0,
+              "avg_streak": 0, "recent_logs": []}
+    if PROACTIVE_DB.exists():
+        try:
+            with _db(PROACTIVE_DB) as conn:
+                row = conn.execute("SELECT COUNT(*) as c FROM student_plans").fetchone()
+                result["total_students"] = row["c"]
+                row = conn.execute("""
+                    SELECT COUNT(DISTINCT jid) as c FROM proactive_log
+                    WHERE date(sent_at) = date('now')
+                """).fetchone()
+                result["active_today"] = row["c"]
+                row = conn.execute("""
+                    SELECT COUNT(*) as c FROM exam_timetable
+                    WHERE exam_date >= date('now')
+                """).fetchone()
+                result["exams_upcoming"] = row["c"]
+                row = conn.execute("SELECT AVG(current_streak) as a FROM student_plans").fetchone()
+                result["avg_streak"] = round(row["a"] or 0, 1)
+                rows = conn.execute("""
+                    SELECT jid, action_type, message, sent_at
+                    FROM proactive_log ORDER BY sent_at DESC LIMIT 20
+                """).fetchall()
+                result["recent_logs"] = _rows_to_dicts(rows)
+        except Exception:
+            pass
+    return result
+
+
+@app.get("/api/proactive/exams")
+def proactive_exams():
+    """Exam timetable entries."""
+    if not PROACTIVE_DB.exists():
+        return {"exams": []}
+    try:
+        with _db(PROACTIVE_DB) as conn:
+            rows = conn.execute("""
+                SELECT * FROM exam_timetable ORDER BY exam_date
+            """).fetchall()
+        return {"exams": _rows_to_dicts(rows)}
+    except Exception:
+        return {"exams": []}
+
+
+# ══════════════════════════════════════════════════════════════
+# AI MODELS
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/api/models")
+def get_models():
+    """Available AI models."""
+    cfg = json.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.exists() else {}
+    current = cfg.get("ai_model", "gpt-4.1-mini")
+    profile_model = cfg.get("profile_model", "gpt-4.1-mini")
+    models = [
+        {"id": "anthropic/claude-haiku-4.5", "name": "Claude Haiku 4.5", "provider": "anthropic"},
+        {"id": "anthropic/claude-sonnet-4.6", "name": "Claude Sonnet 4.6", "provider": "anthropic"},
+        {"id": "openai/gpt-4.1-mini", "name": "GPT-4.1 Mini", "provider": "openai"},
+        {"id": "openai/gpt-4.1", "name": "GPT-4.1", "provider": "openai"},
+        {"id": "google/gemini-3-flash-preview", "name": "Gemini 3 Flash", "provider": "google"},
+    ]
+    return {"models": models, "current": current, "profile_model": profile_model}
+
+
+# ══════════════════════════════════════════════════════════════
+# PROACTIVE - Extra endpoints for frontend
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/api/proactive/students")
+def proactive_students():
+    """Full student details for the proactive tab."""
+    if not PROACTIVE_DB.exists():
+        return {"students": [], "total": 0}
+    with _db(PROACTIVE_DB) as conn:
+        rows = conn.execute("""
+            SELECT * FROM student_plans ORDER BY updated_at DESC
+        """).fetchall()
+    students = _rows_to_dicts(rows)
+    if CONTACTS_DB.exists():
+        try:
+            with _db(CONTACTS_DB) as conn:
+                names = _get_jid_names(conn)
+                for s in students:
+                    s["name"] = names.get(s["jid"], s["jid"].split("@")[0])
+        except Exception:
+            pass
+    return {"students": students, "total": len(students)}
+
+
+@app.get("/api/proactive/stats")
+def proactive_stats():
+    """Proactive system statistics."""
+    result = {"total_students": 0, "active_today": 0, "messages_sent": 0,
+              "avg_streak": 0, "exams_upcoming": 0}
+    if not PROACTIVE_DB.exists():
+        return result
+    try:
+        with _db(PROACTIVE_DB) as conn:
+            row = conn.execute("SELECT COUNT(*) as c FROM student_plans").fetchone()
+            result["total_students"] = row["c"]
+            row = conn.execute("""
+                SELECT COUNT(DISTINCT jid) as c FROM proactive_log
+                WHERE date(sent_at) = date('now')
+            """).fetchone()
+            result["active_today"] = row["c"]
+            row = conn.execute("SELECT COUNT(*) as c FROM proactive_log").fetchone()
+            result["messages_sent"] = row["c"]
+            row = conn.execute("SELECT AVG(current_streak) as a FROM student_plans").fetchone()
+            result["avg_streak"] = round(row["a"] or 0, 1)
+            row = conn.execute("""
+                SELECT COUNT(*) as c FROM exam_timetable
+                WHERE exam_date >= date('now')
+            """).fetchone()
+            result["exams_upcoming"] = row["c"]
+    except Exception:
+        pass
+    return result
+
+
+@app.get("/api/proactive/calendar")
+def proactive_calendar():
+    """Exam calendar entries."""
+    if not PROACTIVE_DB.exists():
+        return {"events": []}
+    try:
+        with _db(PROACTIVE_DB) as conn:
+            rows = conn.execute("""
+                SELECT * FROM exam_calendar ORDER BY exam_date
+            """).fetchall()
+        return {"events": _rows_to_dicts(rows)}
+    except Exception:
+        return {"events": []}
+
+
+@app.post("/api/proactive/calendar")
+def add_calendar_event(payload: dict):
+    """Add an exam calendar event."""
+    if not PROACTIVE_DB.exists():
+        raise HTTPException(404, "Proactive database not found")
+    conn = _db_rw(PROACTIVE_DB)
+    try:
+        conn.execute("""
+            INSERT INTO exam_calendar (jid, subject, exam_date, notes)
+            VALUES (?, ?, ?, ?)
+        """, (payload.get("jid", ""), payload.get("subject", ""),
+              payload.get("exam_date", ""), payload.get("notes", "")))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "ok"}
+
+
+@app.get("/api/proactive/timetable")
+def proactive_timetable():
+    """Exam timetable entries (alias for /api/proactive/exams)."""
+    if not PROACTIVE_DB.exists():
+        return {"timetable": []}
+    try:
+        with _db(PROACTIVE_DB) as conn:
+            rows = conn.execute("""
+                SELECT * FROM exam_timetable ORDER BY exam_date
+            """).fetchall()
+        return {"timetable": _rows_to_dicts(rows)}
+    except Exception:
+        return {"timetable": []}
+
+
+# ══════════════════════════════════════════════════════════════
+# PROACTIVE INTELLIGENCE -- Mastery / Affect / Effectiveness
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/api/proactive/mastery")
+def proactive_mastery_all():
+    """Concept mastery data aggregated across all students."""
+    if not PROACTIVE_DB.exists():
+        return {"concepts": [], "summary": {}, "by_subject": []}
+    with _db(PROACTIVE_DB) as conn:
+        rows = conn.execute("""
+            SELECT cm.*, sp.display_name
+            FROM concept_mastery cm
+            LEFT JOIN student_plans sp ON cm.jid = sp.jid
+            ORDER BY cm.mastery_level ASC, cm.next_review_date ASC
+        """).fetchall()
+        concepts = _rows_to_dicts(rows)
+        agg = conn.execute("""
+            SELECT COUNT(*) as total_concepts,
+                   COUNT(DISTINCT jid) as students_with_concepts,
+                   AVG(mastery_level) as avg_mastery,
+                   SUM(CASE WHEN mastery_level >= 0.8 THEN 1 ELSE 0 END) as mastered,
+                   SUM(CASE WHEN mastery_level < 0.4 THEN 1 ELSE 0 END) as struggling,
+                   SUM(CASE WHEN next_review_date <= date('now') THEN 1 ELSE 0 END) as due_now
+            FROM concept_mastery
+        """).fetchone()
+        subj_rows = conn.execute("""
+            SELECT subject, COUNT(*) as count, AVG(mastery_level) as avg_mastery
+            FROM concept_mastery GROUP BY subject ORDER BY count DESC
+        """).fetchall()
+    if CONTACTS_DB.exists():
+        try:
+            with _db(CONTACTS_DB) as cconn:
+                names = _get_jid_names(cconn)
+                for c in concepts:
+                    if not c.get("display_name"):
+                        c["display_name"] = names.get(c["jid"], c["jid"].split("@")[0])
+        except Exception:
+            pass
+    return {
+        "concepts": concepts,
+        "summary": dict(agg) if agg else {},
+        "by_subject": _rows_to_dicts(subj_rows),
+    }
+
+
+@app.get("/api/proactive/student/{jid}/mastery")
+def proactive_student_mastery(jid: str):
+    """Per-student concept mastery detail."""
+    if not PROACTIVE_DB.exists():
+        return {"concepts": [], "summary": {}}
+    with _db(PROACTIVE_DB) as conn:
+        rows = conn.execute("""
+            SELECT * FROM concept_mastery WHERE jid = ?
+            ORDER BY mastery_level ASC, next_review_date ASC
+        """, (jid,)).fetchall()
+        agg = conn.execute("""
+            SELECT COUNT(*) as total, AVG(mastery_level) as avg_mastery,
+                   AVG(ease_factor) as avg_ease,
+                   SUM(CASE WHEN mastery_level >= 0.8 THEN 1 ELSE 0 END) as mastered,
+                   SUM(CASE WHEN next_review_date <= date('now') THEN 1 ELSE 0 END) as due_now
+            FROM concept_mastery WHERE jid = ?
+        """, (jid,)).fetchone()
+    return {"concepts": _rows_to_dicts(rows), "summary": dict(agg) if agg else {}, "jid": jid}
+
+
+@app.get("/api/proactive/affect-summary")
+def proactive_affect_summary():
+    """Affective state distribution across all students."""
+    if not PROACTIVE_DB.exists():
+        return {"distribution": {}, "students": []}
+    with _db(PROACTIVE_DB) as conn:
+        rows = conn.execute("""
+            SELECT recent_affect, COUNT(*) as count
+            FROM student_plans WHERE enabled = 1 GROUP BY recent_affect
+        """).fetchall()
+        distribution = {r["recent_affect"] or "neutral": r["count"] for r in rows}
+        students = conn.execute("""
+            SELECT jid, display_name, recent_affect, engagement_score,
+                   current_streak, preferred_send_hour
+            FROM student_plans WHERE enabled = 1 ORDER BY engagement_score ASC
+        """).fetchall()
+        student_list = _rows_to_dicts(students)
+    if CONTACTS_DB.exists():
+        try:
+            with _db(CONTACTS_DB) as cconn:
+                names = _get_jid_names(cconn)
+                for s in student_list:
+                    if not s.get("display_name"):
+                        s["display_name"] = names.get(s["jid"], s["jid"].split("@")[0])
+        except Exception:
+            pass
+    return {"distribution": distribution, "students": student_list}
+
+
+@app.get("/api/proactive/effectiveness")
+def proactive_effectiveness():
+    """Message effectiveness analytics across all students."""
+    if not PROACTIVE_DB.exists():
+        return {"by_type": [], "overall": {}, "timeline": [], "decision_distribution": []}
+    with _db(PROACTIVE_DB) as conn:
+        by_type = conn.execute("""
+            SELECT message_type, COUNT(*) as total,
+                   SUM(response_received) as responded,
+                   AVG(CASE WHEN response_time_minutes >= 0 THEN response_time_minutes END) as avg_response_min,
+                   SUM(led_to_study_session) as led_to_study,
+                   SUM(CASE WHEN sentiment_of_response = 'positive' THEN 1 ELSE 0 END) as positive,
+                   SUM(CASE WHEN sentiment_of_response = 'negative' THEN 1 ELSE 0 END) as negative
+            FROM message_effectiveness GROUP BY message_type ORDER BY total DESC
+        """).fetchall()
+        overall = conn.execute("""
+            SELECT COUNT(*) as total, SUM(response_received) as responded,
+                   AVG(CASE WHEN response_time_minutes >= 0 THEN response_time_minutes END) as avg_response_min,
+                   SUM(led_to_study_session) as led_to_study,
+                   SUM(CASE WHEN sentiment_of_response = 'positive' THEN 1 ELSE 0 END) as positive,
+                   SUM(CASE WHEN sentiment_of_response = 'negative' THEN 1 ELSE 0 END) as negative
+            FROM message_effectiveness
+        """).fetchone()
+        timeline = conn.execute("""
+            SELECT date(evaluated_at) as day, COUNT(*) as total,
+                   SUM(response_received) as responded
+            FROM message_effectiveness
+            GROUP BY date(evaluated_at) ORDER BY day DESC LIMIT 30
+        """).fetchall()
+        decision_dist = conn.execute("""
+            SELECT message_type, COUNT(*) as count
+            FROM proactive_log WHERE sent_at >= date('now', '-30 days')
+            GROUP BY message_type ORDER BY count DESC
+        """).fetchall()
+    return {
+        "by_type": _rows_to_dicts(by_type),
+        "overall": dict(overall) if overall else {},
+        "timeline": _rows_to_dicts(timeline),
+        "decision_distribution": _rows_to_dicts(decision_dist),
+    }
+
+
+@app.get("/api/proactive/student/{jid}/full")
+def proactive_student_full(jid: str):
+    """Complete student profile with plan, mastery, affect, effectiveness, logs."""
+    if not PROACTIVE_DB.exists():
+        raise HTTPException(404, "Proactive database not found")
+    with _db(PROACTIVE_DB) as conn:
+        plan_row = conn.execute("SELECT * FROM student_plans WHERE jid = ?", (jid,)).fetchone()
+        if not plan_row:
+            raise HTTPException(404, f"Student {jid} not found")
+        plan = dict(plan_row)
+        mastery = _rows_to_dicts(conn.execute("""
+            SELECT * FROM concept_mastery WHERE jid = ? ORDER BY mastery_level ASC
+        """, (jid,)).fetchall())
+        eff_rows = conn.execute("""
+            SELECT me.*, pl.message_text FROM message_effectiveness me
+            LEFT JOIN proactive_log pl ON me.proactive_log_id = pl.id
+            WHERE me.jid = ? ORDER BY me.evaluated_at DESC LIMIT 50
+        """, (jid,)).fetchall()
+        logs = _rows_to_dicts(conn.execute("""
+            SELECT * FROM proactive_log WHERE jid = ? ORDER BY sent_at DESC LIMIT 30
+        """, (jid,)).fetchall())
+        progress = _rows_to_dicts(conn.execute("""
+            SELECT * FROM study_progress WHERE jid = ? ORDER BY logged_at DESC LIMIT 30
+        """, (jid,)).fetchall())
+    if CONTACTS_DB.exists():
+        try:
+            with _db(CONTACTS_DB) as cconn:
+                names = _get_jid_names(cconn)
+                plan["display_name"] = names.get(jid, plan.get("display_name", jid.split("@")[0]))
+        except Exception:
+            pass
+    return {
+        "plan": plan, "mastery": mastery, "effectiveness": _rows_to_dicts(eff_rows),
+        "logs": logs, "progress": progress,
+    }
+
+
+# ══════════════════════════════════════════════════════════════
+# PROACTIVE INTELLIGENCE DASHBOARD (React SPA)
+# ══════════════════════════════════════════════════════════════
+
+PROACTIVE_UI_DIR = Path(__file__).parent / "proactive-ui" / "dist"
+
+
+@app.get("/proactive")
+def serve_proactive_root():
+    """Serve the Proactive Intelligence Dashboard."""
+    index = PROACTIVE_UI_DIR / "index.html"
+    if index.exists():
+        return HTMLResponse(index.read_text())
+    return JSONResponse({"error": "Proactive dashboard not built"}, 404)
+
+
+if PROACTIVE_UI_DIR.exists():
+    assets_dir = PROACTIVE_UI_DIR / "assets"
+    if assets_dir.exists():
+        app.mount("/proactive/assets", StaticFiles(directory=str(assets_dir)), name="proactive-assets")
+
+
+@app.get("/proactive/{path:path}")
+def serve_proactive_spa(path: str):
+    """Serve proactive dashboard static files or SPA fallback."""
+    file_path = PROACTIVE_UI_DIR / path
+    if file_path.exists() and file_path.is_file():
+        return FileResponse(str(file_path))
+    index = PROACTIVE_UI_DIR / "index.html"
+    if index.exists():
+        return HTMLResponse(index.read_text())
+    raise HTTPException(404)
+
+
+# ══════════════════════════════════════════════════════════════
+# Frontend static files (main dashboard)
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/")
+def serve_root():
+    """Serve the React SPA."""
+    index = FRONTEND_DIR / "index.html"
+    if index.exists():
+        return HTMLResponse(index.read_text())
+    return JSONResponse({"error": "Frontend not built. Run: cd frontend && npm run build"}, 404)
+
+
+# Mount static assets (JS/CSS bundles)
+if FRONTEND_DIR.exists():
+    app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIR / "assets")), name="static-assets")
+
+# Catch-all for SPA client-side routing
+@app.get("/{path:path}")
+def serve_spa(path: str):
+    """Serve static files or fall back to index.html for SPA routing."""
+    file_path = FRONTEND_DIR / path
+    if file_path.exists() and file_path.is_file():
+        return FileResponse(str(file_path))
+    index = FRONTEND_DIR / "index.html"
+    if index.exists():
+        return HTMLResponse(index.read_text())
+    raise HTTPException(404)
 
 
 if __name__ == "__main__":

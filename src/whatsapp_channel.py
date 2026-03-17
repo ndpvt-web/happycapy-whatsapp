@@ -333,13 +333,14 @@ class WhatsAppChannel:
         if admin_number and sender_id == admin_number and not is_group:
             return True
 
-        # Groups: never auto-reply (Theorem T6), but may collect for intelligence
+        # Groups: check group_policy for auto_reply support
         if is_group:
             group_policy = self.config.get("group_policy", "monitor")
             if group_policy == "ignore":
                 return False
+            if group_policy == "auto_reply":
+                return True  # Process group messages for AI reply
             # "monitor" = collect samples but don't process for AI reply
-            # Return "monitor" as a special value handled by the caller
             return False
 
         # Mode check

@@ -426,6 +426,16 @@ export class WhatsAppClient {
     await this.sock.sendPresenceUpdate(type, jid);
   }
 
+  async getGroups(): Promise<Array<{jid: string; name: string; size: number}>> {
+    if (!this.sock) throw new Error('Not connected');
+    const allGroups = await this.sock.groupFetchAllParticipating();
+    return Object.entries(allGroups).map(([jid, metadata]: [string, any]) => ({
+      jid,
+      name: metadata.subject || jid.split('@')[0],
+      size: metadata.participants?.length || metadata.size || 0,
+    }));
+  }
+
   async getProfilePicture(jid: string): Promise<string | null> {
     if (!this.sock) throw new Error('Not connected');
     try {

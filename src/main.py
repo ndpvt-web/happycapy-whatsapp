@@ -66,6 +66,7 @@ from src.broadcast import (
     create_broadcast_engine, BroadcastEngine, BroadcastIntegration,
     CampaignStore, AUTO_SEGMENTS,
 )
+from src.proactive_engine import ProactiveEngine, ProactiveIntegration
 
 try:
     import httpx
@@ -1005,6 +1006,15 @@ class WhatsAppOrchestrator:
             if lessons_ctx:
                 system_prompt = system_prompt + "\n\n---\n\n" + lessons_ctx
 
+        # Proactive plan context injection: tells AI what the student's plan status is
+        if self.proactive:
+            try:
+                plan_ctx = self.proactive.format_plan_for_prompt(sender_id)
+                if plan_ctx:
+                    system_prompt = system_prompt + "\n\n" + plan_ctx
+            except Exception:
+                pass
+
         # Escalation context injection for admin replies:
         # When admin sends a non-slash message, check if it's about a recent escalation.
         # If so, inject the escalation context so the AI knows what it's replying to.
@@ -1060,6 +1070,10 @@ class WhatsAppOrchestrator:
                     func_args = json.loads(func.get("arguments", "{}"))
                 except json.JSONDecodeError:
                     func_args = {}
+
+                # Inject sender JID for proactive tools (they need student context)
+                if func_name in ("set_study_reminder", "update_study_plan", "log_study_progress", "toggle_proactive"):
+                    func_args["jid"] = sender_id
 
                 print(f"  [tools] Executing {func_name}...")
                 result = await self.tool_executor.execute(func_name, func_args)
@@ -1134,9 +1148,12 @@ class WhatsAppOrchestrator:
                 except Exception as e:
                     print(f"  [tools] Failed to send media: {type(e).__name__}")
 
-        # Send text response
+        # Send text response (use ownerApproved for group sends)
         if self.channel and response:
-            await self.channel.send_text(chat_id, response)
+            if "@g.us" in chat_id and self.config.get("group_policy") == "auto_reply":
+                await self.channel.send_text_owner_approved(chat_id, response)
+            else:
+                await self.channel.send_text(chat_id, response)
             history.append({"role": "assistant", "content": response})
             # Theorem T_LOGREDACT: Log reply length, not content (P_LOGPII).
             print(f"[reply -> {sender_id}] ({len(response)} chars)")
@@ -2841,6 +2858,30 @@ class WhatsAppOrchestrator:
         except Exception as e:
             print(f"Broadcast engine init error: {type(e).__name__}: {e}")
 
+        # Proactive engine: student study companion (reminders, nudges, streaks)
+        self.proactive = None
+        try:
+            self.proactive = ProactiveEngine(
+                base_dir=get_config_dir(),
+                channel=None,  # Set after channel is created
+                memory_store=self.memory,
+                config=self.config,
+            )
+            # Register proactive tools with tool executor
+            if self.tool_executor and self.proactive:
+                proactive_integration = ProactiveIntegration(self.proactive)
+                for td in proactive_integration.tool_definitions():
+                    tool_name = td["function"]["name"]
+                    self.tool_executor._handlers[tool_name] = proactive_integration
+                    self.tool_executor._integration_tools.add(tool_name)
+                self.tool_executor._integrations["proactive"] = proactive_integration
+            # Register heartbeat task for proactive schedule checks
+            if self.heartbeat and self.proactive:
+                self.heartbeat.register_task("proactive_babloo", self.proactive.schedule_check)
+            print("Proactive engine initialized")
+        except Exception as e:
+            print(f"Proactive engine init error: {type(e).__name__}: {e}")
+
         # Mark bridge running in health monitor
         if self.health_monitor:
             self.health_monitor.set_bridge_running(True)
@@ -2873,6 +2914,9 @@ class WhatsAppOrchestrator:
         # Share channel with broadcast engine (created before channel exists)
         if self.broadcast:
             self.broadcast._channel = self.channel
+        # Share channel with proactive engine
+        if self.proactive:
+            self.proactive.channel = self.channel
 
         # Start heartbeat service (periodic maintenance)
         if self.heartbeat:

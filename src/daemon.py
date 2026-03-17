@@ -16,7 +16,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-DATA_DIR = Path.home() / ".happycapy-whatsapp"
+DATA_DIR = Path(os.environ.get("WHATSAPP_BASE_DIR", str(Path.home() / ".happycapy-whatsapp")))
 PID_FILE = DATA_DIR / "daemon.pid"
 LOG_FILE = DATA_DIR / "logs" / "daemon.log"
 SKILL_DIR = Path(__file__).resolve().parent.parent

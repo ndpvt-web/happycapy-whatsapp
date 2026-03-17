@@ -35,6 +35,14 @@ export const api = {
   campaigns: () => fetchJSON('/campaigns'),
   lessons: () => fetchJSON('/lessons'),
   cronJobs: () => fetchJSON('/cron'),
-  groups: (limit = 50) => fetchJSON(`/groups?limit=${limit}`),
+  groups: (limit = 500) => fetchJSON(`/groups?limit=${limit}`),
+  groupDetail: (jid) => fetchJSON(`/groups/${encodeURIComponent(jid)}`),
+  syncGroups: () => fetchJSON('/groups/sync', { method: 'POST' }),
+  whatsappStatus: () => fetchJSON('/whatsapp/status'),
+  whatsappLogout: () => fetchJSON('/whatsapp/logout', { method: 'POST' }),
+  broadcastContacts: () => fetchJSON('/broadcast/contacts'),
+  sendBroadcast: (message, recipients) =>
+    fetchJSON('/broadcast', { method: 'POST', body: JSON.stringify({ message, recipients }) }),
+  models: () => fetchJSON('/models'),
   restart: () => fetchJSON('/restart', { method: 'POST' }),
 };

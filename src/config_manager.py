@@ -81,7 +81,7 @@ ENV_OVERRIDES: dict[str, tuple[str, type]] = {
     "WHISPER_API_URL": ("whisper_api_url", str),
 }
 
-CONFIG_DIR = Path.home() / ".happycapy-whatsapp"
+CONFIG_DIR = Path(os.environ.get("WHATSAPP_BASE_DIR", str(Path.home() / ".happycapy-whatsapp")))
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
 

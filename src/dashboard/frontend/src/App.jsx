@@ -2,21 +2,29 @@ import { useState } from 'react';
 import {
   LayoutDashboard, Users, MessageSquare, FileSpreadsheet,
   Settings, Brain, Activity, Shield, RefreshCw, ChevronRight,
-  Send, Bell, Calendar
+  Send, Bell, Calendar, Zap, Smartphone, UsersRound, Radio
 } from 'lucide-react';
 import Overview from './pages/Overview';
+import WhatsAppPage from './pages/WhatsApp';
 import Contacts from './pages/Contacts';
+import Groups from './pages/Groups';
 import Messages from './pages/Messages';
+import Broadcast from './pages/Broadcast';
+import Proactive from './pages/Proactive';
 import Spreadsheets from './pages/Spreadsheets';
-import Config from './pages/Config';
 import Intelligence from './pages/Intelligence';
-import Logs from './pages/Logs';
 import Identity from './pages/Identity';
+import Config from './pages/Config';
+import Logs from './pages/Logs';
 
 const NAV = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'whatsapp', label: 'WhatsApp', icon: Smartphone },
   { id: 'contacts', label: 'Contacts', icon: Users },
+  { id: 'groups', label: 'Groups', icon: UsersRound },
   { id: 'messages', label: 'Messages', icon: MessageSquare },
+  { id: 'broadcast', label: 'Broadcast', icon: Radio },
+  { id: 'proactive', label: 'Proactive', icon: Zap },
   { id: 'spreadsheets', label: 'Spreadsheets', icon: FileSpreadsheet },
   { id: 'intelligence', label: 'Intelligence', icon: Brain },
   { id: 'identity', label: 'Identity', icon: Shield },
@@ -69,8 +77,12 @@ export default function App() {
 
   const pages = {
     overview: <Overview />,
+    whatsapp: <WhatsAppPage />,
     contacts: <Contacts />,
+    groups: <Groups />,
     messages: <Messages />,
+    broadcast: <Broadcast />,
+    proactive: <Proactive />,
     spreadsheets: <Spreadsheets />,
     intelligence: <Intelligence />,
     identity: <Identity />,
