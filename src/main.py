@@ -30,6 +30,8 @@ from src.config_manager import (
     validate_config,
     build_system_prompt,
     get_config_dir,
+    is_admin,
+    get_escalation_target,
     DEFAULT_CONFIG,
 )
 from src.bridge_manager import BridgeManager
@@ -67,6 +69,10 @@ from src.broadcast import (
     CampaignStore, AUTO_SEGMENTS,
 )
 from src.proactive_engine import ProactiveEngine, ProactiveIntegration
+from src.intent_classifier import IntentClassifier, EscalationLevel
+from src.message_aggregator import MessageAggregator
+from src.admin_mode import AdminModeManager
+from src.job_queue import JobQueue
 
 try:
     import httpx
@@ -430,6 +436,57 @@ def map_answers_to_config(answers: dict[str, str]) -> dict:
 # ─── AI Response Generation ───
 
 
+def _collapse_tool_messages(messages: list[dict]) -> list[dict]:
+    """Collapse tool_call + tool_result sequences into plain assistant messages.
+
+    When sending a follow-up request WITHOUT tool definitions, APIs reject
+    messages containing tool_calls or tool-role entries. This function converts
+    such sequences into plain text -- the modular boundary fix.
+
+    Aristotle's insight: transform the FORM of the data at the boundary,
+    not at every call site. One function, all callers fixed.
+    """
+    collapsed = []
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        role = msg.get("role", "")
+
+        if role == "assistant" and msg.get("tool_calls"):
+            # Collect subsequent tool result messages
+            tool_results = []
+            j = i + 1
+            while j < len(messages) and messages[j].get("role") == "tool":
+                tool_results.append(messages[j])
+                j += 1
+
+            # Build collapsed content: assistant text + tool results as text
+            parts = []
+            if msg.get("content"):
+                parts.append(str(msg["content"]))
+            for tr in tool_results:
+                name = tr.get("name", "tool")
+                parts.append(f"[Called {name}]: {tr.get('content', '(no output)')}")
+
+            collapsed.append({
+                "role": "assistant",
+                "content": "\n".join(parts) if parts else "(tool executed)",
+            })
+            i = j  # Skip past all consumed tool results
+        elif role == "tool":
+            # Orphan tool message -- convert to assistant text
+            collapsed.append({
+                "role": "assistant",
+                "content": f"[{msg.get('name', 'tool')} result]: {msg.get('content', '')}",
+            })
+            i += 1
+        else:
+            collapsed.append(msg)
+            i += 1
+
+    return collapsed
+
+
 async def generate_ai_response(
     message: str,
     system_prompt: str,
@@ -463,6 +520,12 @@ async def generate_ai_response(
     messages = [{"role": "system", "content": system_prompt}]
     messages.extend(chat_history[-20:])
 
+    # Structural boundary fix: if this request has NO tool definitions,
+    # collapse any tool_call/tool messages in history into plain text.
+    # APIs reject tool-related messages when tools aren't declared.
+    if not tools:
+        messages = _collapse_tool_messages(messages)
+
     if media_content and message:
         user_parts = [{"type": "text", "text": message}]
         user_parts.extend(media_content)
@@ -473,7 +536,9 @@ async def generate_ai_response(
 
     url = f"{gateway_url}/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    payload = {"model": model, "messages": messages, "max_tokens": 1024, "temperature": 0.7}
+    # Use higher max_tokens when tools are present (tool calls consume output tokens)
+    max_tok = 4096 if tools else 1024
+    payload = {"model": model, "messages": messages, "max_tokens": max_tok, "temperature": 0.7}
 
     # Add tool definitions if provided
     if tools:
@@ -500,8 +565,12 @@ async def generate_ai_response(
                 finish_reason=choice.get("finish_reason", "stop"),
             )
         else:
-            # Theorem T_ERRREDACT: Don't log raw API response body (P_LOGPII).
-            print(f"AI Gateway error: HTTP {resp.status_code}")
+            # Log error type from gateway (redact any PII from body).
+            try:
+                err_body = resp.text[:300]  # Truncate to avoid log bloat
+            except Exception:
+                err_body = "(unreadable)"
+            print(f"AI Gateway error: HTTP {resp.status_code} | {err_body}")
             return _error("I'm having trouble thinking right now. Please try again in a moment.")
     except Exception as e:
         # Theorem T_ERRREDACT: Log error type only, not full message which may contain PII.
@@ -575,6 +644,14 @@ class WhatsAppOrchestrator:
         # Broadcast campaign engine
         self.broadcast: BroadcastEngine | None = None
         self._broadcast_store: CampaignStore | None = None
+        # LLM-based intent classifier (BUG-001: smart escalation)
+        self.intent_classifier: IntentClassifier | None = None
+        # Message aggregator / debounce layer (BUG-002: batch multi-part messages)
+        self.aggregator: MessageAggregator | None = None
+        # Admin elevated mode manager (/break-chains, /secure-it)
+        self.admin_mode: AdminModeManager = AdminModeManager()
+        # Proactive job queue (deferred follow-up tasks)
+        self.job_queue: JobQueue | None = None
 
     def print_setup_instructions(self) -> None:
         """Print the setup wizard questions for the user to answer via AskUserQuestion."""
@@ -669,7 +746,16 @@ class WhatsAppOrchestrator:
         lock = self._contact_locks.setdefault(chat_id, asyncio.Lock())
 
         async with lock:
-            await self._process_message(sender_id, chat_id, content, media_paths, metadata)
+            try:
+                await self._process_message(sender_id, chat_id, content, media_paths, metadata)
+            except Exception as e:
+                print(f"[ERROR] _process_message failed for {sender_id}: {type(e).__name__}: {e}")
+                # Try to send a fallback reply so the user isn't left hanging
+                try:
+                    if self.channel:
+                        await self.channel.send_text(chat_id, "I'm having trouble processing that. Please try again.")
+                except Exception:
+                    pass
 
     async def _process_message(
         self, sender_id: str, chat_id: str, content: str, media_paths: list, metadata: dict
@@ -717,8 +803,8 @@ class WhatsAppOrchestrator:
                 del self._takeover_contacts[sender_id]
 
         # Theorem T_ADMCMD: Admin slash commands are handled directly, not forwarded to AI.
-        admin_number = self.config.get("admin_number", "")
-        if admin_number and sender_id == admin_number and content.strip().startswith("/"):
+        sender_is_admin = is_admin(self.config, sender_id)
+        if sender_is_admin and content.strip().startswith("/"):
             if self.audit_log:
                 self.audit_log.log("admin_cmd", chat_id, "inbound", len(content), metadata.get("id", ""))
             await self._handle_admin_command(chat_id, content.strip(), metadata)
@@ -726,9 +812,9 @@ class WhatsAppOrchestrator:
 
         # Owner correction detection: when admin manually types in a contact's chat
         # (not their own), and the bot had previously replied, record as correction.
-        if admin_number and sender_id == admin_number:
+        if sender_is_admin:
             contact_jid = chat_id.split("@")[0] if "@" in chat_id else chat_id
-            if contact_jid != admin_number and self.reflection and contact_jid in self._last_bot_response:
+            if not is_admin(self.config, contact_jid) and self.reflection and contact_jid in self._last_bot_response:
                 bot_said = self._last_bot_response.pop(contact_jid)
                 contact_name = ""
                 if self.contact_store:
@@ -744,9 +830,9 @@ class WhatsAppOrchestrator:
                 # Don't process further -- admin's direct chat message goes to the contact as-is
                 return
 
-        # Auto-enroll students from Grade 9/10 groups (for proactive system)
-        if self.proactive and chat_id.endswith("@g.us"):
-            self._auto_enroll_student(sender_id, chat_id, metadata)
+        # Proactive student engine disabled -- bot is a general WhatsApp assistant
+        # if self.proactive and chat_id.endswith("@g.us"):
+        #     self._auto_enroll_student(sender_id, chat_id, metadata)
 
         # ── Intelligence layer: score, queue, audit (T_SCOREPLUGIN, T_QUEUEFIRST, T_AUDITALL) ──
         score, reasons = (5, [])
@@ -779,60 +865,96 @@ class WhatsAppOrchestrator:
                         self.audit_log.log("msg_out", chat_id, "outbound", len(template_reply), "", {"auto_reply": True, "status": status})
                     return
 
-        # High importance: notify admin (if enabled and not from admin themselves)
-        # Always alert admin for high-importance messages regardless of personality mode.
-        # In impersonate mode, the bot also uses ask_owner for questions -- alerts are
-        # a separate safety net for messages the LLM might not escalate on its own.
-        alert_enabled = (
+        # Admin alert: use LLM intent classifier to decide escalation (BUG-001 fix).
+        # The old deterministic scorer (base 5 + known contact +2 = 7) triggered for
+        # ALL known contacts. The intent classifier asks the right question:
+        # "Does the owner NEED to be involved, or can the AI handle this?"
+        # Fallback: if classifier is unavailable, use the old score threshold.
+        escalation_target = get_escalation_target(self.config)
+        if (
             self.config.get("escalation_enabled", True)
-            and score >= self.config.get("importance_threshold", 7)
-            and sender_id != admin_number
-            and admin_number
-        )
-        if alert_enabled:
+            and not sender_is_admin
+            and escalation_target
+        ):
             sender_name = metadata.get("sender_name", sender_id)
-            alert_data = {
-                "sender_id": sender_id,
-                "sender_name": sender_name,
-                "content_preview": content[:100],
-                "score": score,
-                "reasons": reasons,
-            }
-            # Check quiet hours suppression
-            if self.quiet_hours and self.quiet_hours.should_suppress(score):
-                self.quiet_hours.queue_alert(alert_data)
-                print(f"[quiet-hours] Alert suppressed for {sender_name} (score {score})")
-            else:
-                admin_jid = f"{admin_number}@s.whatsapp.net"
-                # Include actual message preview so admin knows what was said
-                preview = content[:300] + ("..." if len(content) > 300 else "")
-                alert = f"*[{score}/10]* {sender_name}:\n{preview}"
+            should_alert = False
+            alert_level_label = ""
+
+            if self.intent_classifier:
                 try:
-                    await self.channel.send_text(admin_jid, alert)
-                    # Track alert for escalation context matching when admin replies
-                    from datetime import datetime as _dt
-                    self._recent_escalation_alerts.append({
-                        "sender_id": sender_id,
-                        "sender_name": sender_name,
-                        "content_preview": content[:500],
-                        "score": score,
-                        "timestamp": _dt.now().isoformat(),
-                    })
-                    # Trim to max size
-                    if len(self._recent_escalation_alerts) > self._ESCALATION_ALERT_MAX:
-                        self._recent_escalation_alerts = self._recent_escalation_alerts[-self._ESCALATION_ALERT_MAX:]
-                except Exception:
-                    pass  # Don't fail main pipeline if admin alert fails
+                    # Build minimal contact context for classifier
+                    contact_ctx = ""
+                    if self.context_builder:
+                        try:
+                            contact_ctx = self.context_builder.get_contact_summary(sender_id) or ""
+                        except Exception:
+                            pass
+
+                    classification = await self.intent_classifier.classify(
+                        content=content,
+                        sender_id=sender_id,
+                        contact_context=contact_ctx,
+                        http_client=self._http_client,
+                    )
+                    should_alert = classification.level in (
+                        EscalationLevel.ESCALATE, EscalationLevel.URGENT
+                    )
+                    alert_level_label = classification.level.value
+                    print(
+                        f"[intent-classifier] {sender_id}: {classification.level.value} "
+                        f"(confidence={classification.confidence:.2f}, llm={classification.used_llm}) "
+                        f"-- {classification.reason}"
+                    )
+                except Exception as e:
+                    # Classifier failed: fall back to old threshold logic
+                    print(f"[intent-classifier] error, falling back to score threshold: {e}")
+                    should_alert = score >= self.config.get("importance_threshold", 7)
+                    alert_level_label = f"{score}/10"
+            else:
+                # Classifier not initialized: fall back to old threshold
+                should_alert = score >= self.config.get("importance_threshold", 7)
+                alert_level_label = f"{score}/10"
+
+            if should_alert:
+                alert_data = {
+                    "sender_id": sender_id,
+                    "sender_name": sender_name,
+                    "content_preview": content[:100],
+                    "score": score,
+                    "reasons": reasons,
+                }
+                # Check quiet hours suppression
+                if self.quiet_hours and self.quiet_hours.should_suppress(score):
+                    self.quiet_hours.queue_alert(alert_data)
+                    print(f"[quiet-hours] Alert suppressed for {sender_name} ({alert_level_label})")
+                else:
+                    esc_jid = f"{escalation_target}@s.whatsapp.net"
+                    preview = content[:300] + ("..." if len(content) > 300 else "")
+                    alert = f"*[{alert_level_label}]* {sender_name}:\n{preview}"
+                    try:
+                        await self.channel.send_text(esc_jid, alert)
+                        from datetime import datetime as _dt
+                        self._recent_escalation_alerts.append({
+                            "sender_id": sender_id,
+                            "sender_name": sender_name,
+                            "content_preview": content[:500],
+                            "score": score,
+                            "timestamp": _dt.now().isoformat(),
+                        })
+                        if len(self._recent_escalation_alerts) > self._ESCALATION_ALERT_MAX:
+                            self._recent_escalation_alerts = self._recent_escalation_alerts[-self._ESCALATION_ALERT_MAX:]
+                    except Exception:
+                        pass  # Don't fail main pipeline if admin alert fails
 
         # Quiet hours: check if digest needs flushing (runs on every message)
-        if self.quiet_hours and admin_number:
+        if self.quiet_hours and escalation_target:
             queued_alerts = self.quiet_hours.check_and_flush()
             if queued_alerts:
                 digest = self.quiet_hours.format_digest(queued_alerts)
                 if digest:
-                    admin_jid = f"{admin_number}@s.whatsapp.net"
+                    esc_jid = f"{escalation_target}@s.whatsapp.net"
                     try:
-                        await self.channel.send_text(admin_jid, digest)
+                        await self.channel.send_text(esc_jid, digest)
                         print(f"[quiet-hours] Flushed {len(queued_alerts)} queued alerts as digest")
                     except Exception:
                         pass
@@ -1010,6 +1132,21 @@ class WhatsAppOrchestrator:
             if lessons_ctx:
                 system_prompt = system_prompt + "\n\n---\n\n" + lessons_ctx
 
+        # Inject elevated mode context when admin is in /break-chains mode
+        if sender_is_admin and self.admin_mode.is_elevated(chat_id):
+            elevated_ctx = (
+                "## ELEVATED MODE ACTIVE\n"
+                "You are in elevated admin mode (/break-chains). You have access to:\n"
+                "- `access_contact_memory` tool: look up any contact's memory by name/number\n"
+                "- `search_across_contacts` tool: search keywords across all contacts\n"
+                "- `create_followup_job` tool: queue a follow-up task for any contact\n"
+                "- `list_pending_jobs` tool: see all pending follow-up tasks\n\n"
+                "When admin asks about a contact, USE the access_contact_memory tool.\n"
+                "When admin asks to follow up with someone, USE create_followup_job.\n"
+                "This mode auto-expires after 30 minutes of inactivity."
+            )
+            system_prompt = system_prompt + "\n\n---\n\n" + elevated_ctx
+
         # Proactive plan context injection: tells AI what the student's plan status is
         if self.proactive:
             try:
@@ -1022,7 +1159,7 @@ class WhatsAppOrchestrator:
         # Escalation context injection for admin replies:
         # When admin sends a non-slash message, check if it's about a recent escalation.
         # If so, inject the escalation context so the AI knows what it's replying to.
-        if sender_id == admin_number and self._recent_escalation_alerts:
+        if sender_is_admin and self._recent_escalation_alerts:
             esc_context = self._build_escalation_context_for_admin(content)
             if esc_context:
                 system_prompt = system_prompt + "\n\n---\n\n" + esc_context
@@ -1047,25 +1184,73 @@ class WhatsAppOrchestrator:
         # Cleanup temporary files
         cleanup_temp_files(*temp_files_to_cleanup)
 
-        # ── Tool call loop (max 1 iteration) ──
+        # ── Multi-round tool loop (max 5 rounds to prevent infinite loops) ──
+        # Aristotelian insight: a booking flow is check_calendar -> create_event
+        # (two sequential tool calls). The LLM must be allowed to chain tools.
+        MAX_TOOL_ROUNDS = 5
         response = ai_resp.content or ""
         generated_media: list[str] = []  # Paths to files generated by tools
-        tool_result_messages: list[dict] = []
+        tool_result_messages: list[dict] = []  # Initialized before loop for fabrication guard check
+        current_resp = ai_resp
+        tool_defs = self.tool_executor.get_tool_definitions() if self.tool_executor else None
 
-        if ai_resp.finish_reason == "tool_calls" and ai_resp.tool_calls and self.tool_executor:
-            tool_count = len(ai_resp.tool_calls)
-            print(f"  [tools] LLM requested {tool_count} tool(s)")
+        for tool_round in range(MAX_TOOL_ROUNDS):
+            if not current_resp.tool_calls or not self.tool_executor:
+                break
+
+            # Build set of known tool names from definitions
+            known_tools = {
+                td["function"]["name"]
+                for td in self.tool_executor.get_tool_definitions()
+                if "function" in td and "name" in td["function"]
+            }
+
+            # Filter out hallucinated tools and broken partial calls
+            valid_tool_calls = []
+            filtered_names = []
+            for tc in current_resp.tool_calls:
+                func = tc.get("function", {})
+                name = func.get("name", "")
+                if name not in known_tools:
+                    filtered_names.append(f"{name}(unknown)")
+                    continue
+                try:
+                    json.loads(func.get("arguments", "{}"))
+                except (json.JSONDecodeError, TypeError):
+                    filtered_names.append(f"{name}(bad-json)")
+                    continue
+                valid_tool_calls.append(tc)
+            if filtered_names:
+                print(f"  [tools] Filtered {len(filtered_names)} invalid tool call(s): {filtered_names}")
+
+            if not valid_tool_calls:
+                print(f"  [tools] No valid tool calls remain after filtering (finish_reason={current_resp.finish_reason})")
+                if not response:
+                    print("  [tools] No text response either -- retrying without tools for fallback reply...")
+                    fallback_resp = await generate_ai_response(
+                        message="",
+                        system_prompt=system_prompt,
+                        chat_history=history,
+                        config=self.config,
+                        client=self._http_client,
+                        tools=None,
+                    )
+                    response = fallback_resp.content or ""
+                break
+
+            print(f"  [tools] Round {tool_round + 1}: LLM requested {len(valid_tool_calls)} tool(s)")
 
             # Send "generating..." for slow tools (video)
             has_video = any(
                 tc.get("function", {}).get("name") == "generate_video"
-                for tc in ai_resp.tool_calls
+                for tc in valid_tool_calls
             )
             if has_video and self.channel:
                 await self.channel.send_text(chat_id, "Generating video, this may take a minute...")
 
             # Execute each tool call
-            for tc in ai_resp.tool_calls:
+            tool_result_messages: list[dict] = []
+            for tc in valid_tool_calls:
                 tc_id = tc.get("id", "")
                 func = tc.get("function", {})
                 func_name = func.get("name", "")
@@ -1075,12 +1260,12 @@ class WhatsAppOrchestrator:
                 except json.JSONDecodeError:
                     func_args = {}
 
-                # Inject sender JID for proactive tools (they need student context)
+                # Inject sender JID for proactive tools
                 if func_name in ("set_study_reminder", "update_study_plan", "log_study_progress", "toggle_proactive"):
                     func_args["jid"] = sender_id
 
                 print(f"  [tools] Executing {func_name}...")
-                result = await self.tool_executor.execute(func_name, func_args)
+                result = await self.tool_executor.execute(func_name, func_args, sender_id=sender_id)
 
                 if result.success and result.media_path:
                     generated_media.append(result.media_path)
@@ -1101,24 +1286,37 @@ class WhatsAppOrchestrator:
                 })
 
             # Add assistant tool_call message + tool results to history
+            sanitized_tool_calls = [
+                {
+                    "id": tc.get("id", f"call_{i}"),
+                    "type": "function",
+                    "function": {
+                        "name": tc.get("function", {}).get("name", ""),
+                        "arguments": tc.get("function", {}).get("arguments", "{}"),
+                    },
+                }
+                for i, tc in enumerate(valid_tool_calls)
+            ]
             history.append({
                 "role": "assistant",
-                "content": ai_resp.content,
-                "tool_calls": ai_resp.tool_calls,
+                "content": current_resp.content,
+                "tool_calls": sanitized_tool_calls,
             })
             history.extend(tool_result_messages)
 
-            # Call LLM again with tool results to get final text response (no tools this time)
-            print("  [tools] Getting final response with tool results...")
-            final_resp = await generate_ai_response(
+            # Call LLM again WITH tools so it can chain (e.g. check_calendar -> create_event)
+            print(f"  [tools] Getting response after round {tool_round + 1}...")
+            next_resp = await generate_ai_response(
                 message="",
                 system_prompt=system_prompt,
                 chat_history=history,
                 config=self.config,
                 client=self._http_client,
-                tools=None,
+                tools=tool_defs,
             )
-            response = final_resp.content or ""
+            response = next_resp.content or ""
+            current_resp = next_resp
+            # Loop continues if next_resp has more tool_calls
 
         # ── Outbound guards: content filter + fabrication guard (before sending) ──
         if response:
@@ -1486,9 +1684,27 @@ class WhatsAppOrchestrator:
                 "/segment preview <id> - Preview contacts in a segment\n"
                 "/tools - Tool calling status (or /tools on|off)\n"
                 "/reflect - Reflection engine stats (lessons learned)\n"
+                "/break-chains - Activate elevated mode (cross-contact access)\n"
+                "/secure-it - Deactivate elevated mode\n"
+                "/jobs - List pending follow-up jobs\n"
                 "/help - This message"
             )
             await self.channel.send_text(chat_id, help_text)
+
+        elif cmd == "/break-chains":
+            msg = self.admin_mode.activate(chat_id)
+            await self.channel.send_text(chat_id, msg)
+
+        elif cmd == "/secure-it":
+            msg = self.admin_mode.deactivate(chat_id)
+            await self.channel.send_text(chat_id, msg)
+
+        elif cmd == "/jobs":
+            if self.job_queue:
+                jobs = self.job_queue.get_pending(limit=20)
+                await self.channel.send_text(chat_id, self.job_queue.format_job_list(jobs))
+            else:
+                await self.channel.send_text(chat_id, "Job queue not initialized.")
 
         elif cmd == "/status":
             profiles_count = len(self.contact_store.get_all_profiles()) if self.contact_store else 0
@@ -2661,8 +2877,18 @@ class WhatsAppOrchestrator:
         if not self.contact_store:
             return
 
+        # Allowlisted group JIDs for history sync capture (monitor-only analysis)
+        _ALLOWED_GROUP_JIDS = {
+            "120363403758006456@g.us",  # Brothers of AD 25-26
+            "120363420327984194@g.us",  # Home of AD 25-26
+        }
+
         stored = 0
-        skipped = 0
+        stored_group = 0
+        skipped_empty = 0
+        skipped_group = 0
+        skipped_short = 0
+        errors = 0
         sync_names = {0: "INITIAL", 1: "STATUS", 2: "FULL", 3: "RECENT", 4: "PUSH_NAME", 5: "NON_BLOCKING", 6: "ON_DEMAND"}
         sync_name = sync_names.get(sync_type, f"TYPE_{sync_type}")
 
@@ -2673,45 +2899,68 @@ class WhatsAppOrchestrator:
                 from_me = msg.get("fromMe", False)
                 timestamp = msg.get("timestamp", 0)
 
-                # Skip empty, group messages, and status broadcasts
+                # Skip empty and status broadcasts
                 if not content or not chat_jid:
-                    skipped += 1
+                    skipped_empty += 1
                     continue
-                if chat_jid.endswith("@g.us") or chat_jid == "status@broadcast":
-                    skipped += 1
+                if chat_jid == "status@broadcast":
+                    skipped_empty += 1
                     continue
                 # Skip very short content (system messages, reactions)
                 if len(content.strip()) < 2:
-                    skipped += 1
+                    skipped_short += 1
                     continue
 
-                # Determine JID and role
-                jid = chat_jid.split("@")[0] if "@" in chat_jid else chat_jid
-                role = "assistant" if from_me else "user"
-
                 # Convert epoch timestamp to ISO format
+                # Handle dict timestamps from protobuf Long objects {low, high, unsigned}
                 from datetime import datetime, timezone
+                if isinstance(timestamp, dict):
+                    timestamp = timestamp.get("low", 0) or 0
+                if not isinstance(timestamp, (int, float)):
+                    try:
+                        timestamp = int(timestamp)
+                    except (TypeError, ValueError):
+                        timestamp = 0
                 ts_str = datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat() if timestamp else ""
 
-                # Store to conversation_samples (contact_store handles dedup implicitly)
+                # Route: group messages from allowlisted groups -> group_samples table
+                if chat_jid.endswith("@g.us"):
+                    if chat_jid in _ALLOWED_GROUP_JIDS:
+                        sender_id = msg.get("participant", "")
+                        if not sender_id and from_me:
+                            sender_id = "me"
+                        sender_id = sender_id.split("@")[0] if "@" in sender_id else sender_id
+                        await self.contact_store.store_group_sample(
+                            chat_jid, sender_id, content[:2000],
+                            timestamp=ts_str, skip_cooldown=True,
+                        )
+                        stored_group += 1
+                    else:
+                        skipped_group += 1
+                    continue
+
+                # DM messages -> conversation_samples table
+                jid = chat_jid.split("@")[0] if "@" in chat_jid else chat_jid
+                role = "assistant" if from_me else "user"
                 await self.contact_store.store_sample(jid, role, content[:2000], ts_str)
                 stored += 1
 
             except Exception as e:
-                skipped += 1
-                if stored == 0 and skipped < 3:
+                errors += 1
+                if errors <= 3:
                     print(f"[history-sync] Error processing message: {e}")
 
-        self._history_sync_stats["total_stored"] += stored
-        self._history_sync_stats["total_skipped"] += skipped
+        total_skipped = skipped_empty + skipped_group + skipped_short + errors
+        self._history_sync_stats["total_stored"] += stored + stored_group
+        self._history_sync_stats["total_skipped"] += total_skipped
         self._history_sync_stats["syncs_received"] += 1
 
-        print(f"[history-sync] {sync_name}: stored={stored}, skipped={skipped}, progress={progress}, latest={is_latest}")
+        print(f"[history-sync] {sync_name}: stored_dm={stored}, stored_group={stored_group}, skipped(empty={skipped_empty},group={skipped_group},short={skipped_short},err={errors}), progress={progress}, latest={is_latest}")
 
         if self.audit_log:
             self.audit_log.log(
                 "history_sync", "", "inbound", 0, "",
-                {"sync_type": sync_name, "stored": stored, "skipped": skipped, "progress": progress},
+                {"sync_type": sync_name, "stored": stored, "skipped": total_skipped, "progress": progress},
             )
 
     async def handle_group_message(
@@ -2788,6 +3037,8 @@ class WhatsAppOrchestrator:
             self.fabrication_guard = FabricationGuard()
         self.content_filter = ContentFilter()
         self.health_monitor = HealthMonitor()
+        # Intent classifier: LLM-based escalation decision (BUG-001)
+        self.intent_classifier = IntentClassifier(self.config)
         # Context builder: layered system prompt assembly with identity files
         self.context_builder = ContextBuilder(
             get_config_dir(),
@@ -2832,10 +3083,10 @@ class WhatsAppOrchestrator:
                 now = datetime.datetime.now()
                 if now.hour < 8 or now.hour >= 10:
                     return
-                admin_number = bot_ref.config.get("admin_number", "")
-                if not admin_number or not bot_ref.channel:
+                summary_target = get_escalation_target(bot_ref.config)
+                if not summary_target or not bot_ref.channel:
                     return
-                admin_jid = f"{admin_number}@s.whatsapp.net"
+                admin_jid = f"{summary_target}@s.whatsapp.net"
                 # Gather stats
                 msg_count = bot_ref._daily_msg_count
                 unique_contacts = len(bot_ref._daily_unique_contacts)
@@ -2869,17 +3120,59 @@ class WhatsAppOrchestrator:
         # Cron/scheduling service
         self.cron = CronService(db_path)
         async def _cron_callback(job: dict) -> None:
-            """Fire a cron job: send its message to the target chat or admin."""
+            """Fire a cron job with smart delivery routing.
+
+            Supports two message formats:
+            1. Plain text (legacy): send as WhatsApp message
+            2. JSON payload: {"text": "...", "delivery": "whatsapp|email|both", "email": "..."}
+               Enables delivery via WhatsApp, email, or both.
+            """
+            import json as _json
             target = job.get("target_chat", "")
             if not target:
-                admin_number = self.config.get("admin_number", "")
-                if admin_number:
-                    target = f"{admin_number}@s.whatsapp.net"
-            if target and self.channel:
-                msg = f"*Reminder: {job['name']}*\n{job['message']}"
-                await self.channel.send_text(target, msg)
-                if self.audit_log:
-                    self.audit_log.log("cron_fire", target, "outbound", len(msg), "", {"job_id": job["id"], "kind": job["kind"]})
+                _esc = get_escalation_target(self.config)
+                if _esc:
+                    target = f"{_esc}@s.whatsapp.net"
+
+            raw_message = job.get("message", "")
+            delivery = "whatsapp"
+            email_addr = ""
+            msg_text = raw_message
+
+            # Try to parse as JSON payload (scheduler integration format)
+            try:
+                payload = _json.loads(raw_message)
+                if isinstance(payload, dict) and "text" in payload:
+                    msg_text = payload["text"]
+                    delivery = payload.get("delivery", "whatsapp")
+                    email_addr = payload.get("email", "")
+            except (ValueError, TypeError):
+                pass  # Plain text message, use as-is
+
+            formatted_msg = f"*Reminder: {job['name']}*\n{msg_text}"
+
+            # WhatsApp delivery
+            if delivery in ("whatsapp", "both") and target and self.channel:
+                await self.channel.send_text(target, formatted_msg)
+
+            # Email delivery
+            if delivery in ("email", "both") and email_addr:
+                try:
+                    import subprocess
+                    gws_path = os.path.expanduser("~/.cargo/bin/gws")
+                    if os.path.exists(gws_path):
+                        subprocess.run(
+                            [gws_path, "gmail", "+send",
+                             "--to", email_addr,
+                             "--subject", f"Reminder: {job['name']}",
+                             "--body", msg_text],
+                            timeout=30, capture_output=True,
+                        )
+                except Exception as e:
+                    print(f"[cron] Email delivery failed: {e}")
+
+            if self.audit_log:
+                self.audit_log.log("cron_fire", target, "outbound", len(formatted_msg), "", {"job_id": job["id"], "kind": job["kind"], "delivery": delivery})
         self.cron.set_callback(_cron_callback)
         print("Intelligence layer initialized (scoring, queue, escalation, KG, templates, audit, memory, reflection, quiet_hours, guards, health, heartbeat, context, session, cron)")
 
@@ -2925,29 +3218,92 @@ class WhatsAppOrchestrator:
         except Exception as e:
             print(f"Broadcast engine init error: {type(e).__name__}: {e}")
 
-        # Proactive engine: student study companion (reminders, nudges, streaks)
-        self.proactive = None
+        # Register new integrations that need runtime dependencies (follows broadcast pattern)
+        def _register_integration(integ, label):
+            """Helper: register an integration's tools with the tool executor."""
+            if not self.tool_executor:
+                return
+            for td in integ.tool_definitions():
+                tname = td["function"]["name"]
+                self.tool_executor._handlers[tname] = integ
+                self.tool_executor._integration_tools.add(tname)
+            self.tool_executor._integrations[integ.info().name] = integ
+            print(f"[integrations] Loaded: {label}")
+
+        # Web Search (modular: swappable provider via config["web_search_provider"])
         try:
-            self.proactive = ProactiveEngine(
-                base_dir=get_config_dir(),
-                channel=None,  # Set after channel is created
-                memory_store=self.memory,
-                config=self.config,
-            )
-            # Register proactive tools with tool executor
-            if self.tool_executor and self.proactive:
-                proactive_integration = ProactiveIntegration(self.proactive)
-                for td in proactive_integration.tool_definitions():
-                    tool_name = td["function"]["name"]
-                    self.tool_executor._handlers[tool_name] = proactive_integration
-                    self.tool_executor._integration_tools.add(tool_name)
-                self.tool_executor._integrations["proactive"] = proactive_integration
-            # Register heartbeat task for proactive schedule checks
-            if self.heartbeat and self.proactive:
-                self.heartbeat.register_task("proactive_babloo", self.proactive.schedule_check)
-            print("Proactive engine initialized")
+            from src.integrations.web_search import Integration as WebSearchInteg
+            _register_integration(WebSearchInteg(config=self.config), "Web Search")
         except Exception as e:
-            print(f"Proactive engine init error: {type(e).__name__}: {e}")
+            print(f"[integrations] Web search skipped: {e}")
+
+        # Scheduler (wraps CronService as LLM-accessible tools)
+        try:
+            from src.integrations.scheduler import Integration as SchedulerInteg
+            _register_integration(SchedulerInteg(config=self.config, cron=self.cron), "Scheduler")
+        except Exception as e:
+            print(f"[integrations] Scheduler skipped: {e}")
+
+        # Contact Research (combines web search + KG + contact store)
+        try:
+            from src.integrations.contact_research import Integration as ContactResearchInteg
+            _register_integration(
+                ContactResearchInteg(
+                    config=self.config,
+                    knowledge_graph=self.kg,
+                    contact_store=self.contact_store,
+                ),
+                "Contact Research",
+            )
+        except Exception as e:
+            print(f"[integrations] Contact research skipped: {e}")
+
+        # Mac Bridge (remote Mac control via Capy Bridge relay API)
+        try:
+            from src.integrations.mac_bridge import Integration as MacBridgeInteg
+            _register_integration(MacBridgeInteg(config=self.config), "Mac Bridge")
+        except Exception as e:
+            print(f"[integrations] Mac Bridge skipped: {e}")
+
+        # Email Monitor (proactive inbox watching with approval-gated replies)
+        self._email_monitor = None
+        try:
+            from src.integrations.email_monitor import Integration as EmailMonitorInteg
+            em = EmailMonitorInteg(config=self.config)
+            _register_integration(em, "Email Monitor")
+            self._email_monitor = em
+        except Exception as e:
+            print(f"[integrations] Email Monitor skipped: {e}")
+
+        # Job Queue (proactive follow-up tasks)
+        try:
+            self.job_queue = JobQueue()
+            print("Job queue initialized")
+        except Exception as e:
+            print(f"Job queue init error: {e}")
+
+        # Admin Tools (cross-contact access, job management -- elevated mode only)
+        try:
+            from src.integrations.admin_tools import Integration as AdminToolsInteg
+            _register_integration(
+                AdminToolsInteg(
+                    config=self.config,
+                    admin_mode=self.admin_mode,
+                    memory_store=self.memory,
+                    contact_store=self.contact_store,
+                    knowledge_graph=self.kg,
+                    job_queue=self.job_queue,
+                ),
+                "Admin Tools",
+            )
+        except Exception as e:
+            print(f"[integrations] Admin Tools skipped: {e}")
+
+        # Proactive engine DISABLED -- bot is a general WhatsApp assistant, not a study companion.
+        # The proactive engine (proactive_engine.py) is a Babloo-specific study companion
+        # with student tracking, mastery, spaced repetition, etc. Not needed for general use.
+        self.proactive = None
+        print("Proactive engine: disabled (general assistant mode)")
 
         # Mark bridge running in health monitor
         if self.health_monitor:
@@ -2969,10 +3325,21 @@ class WhatsAppOrchestrator:
         if removed:
             print(f"Startup media cleanup: removed {removed} expired files")
 
+        # Build aggregator (BUG-002: debounce multi-part messages before orchestrator).
+        # The aggregator sits between channel dispatch and handle_message.
+        # It accumulates rapid successive messages from the same contact into one
+        # combined message, then calls handle_message once when the window expires.
+        self.aggregator = MessageAggregator(
+            config=self.config,
+            handler=self.handle_message,
+            intent_classifier=self.intent_classifier,
+        )
+
         # Start channel (with group collector callback)
+        # on_message routes through aggregator; group messages bypass it (handled separately)
         self.channel = WhatsAppChannel(
             config=self.config,
-            on_message=self.handle_message,
+            on_message=self.aggregator.enqueue,
             on_group_message=self.handle_group_message,
             on_history_sync=self._handle_history_sync,
             on_contacts_sync=self._handle_contacts_sync,
@@ -2993,6 +3360,10 @@ class WhatsAppOrchestrator:
         if self.cron:
             await self.cron.start()
 
+        # Start email monitor (proactive inbox polling)
+        if self._email_monitor:
+            await self._email_monitor.start_monitor(channel=self.channel, bot=self)
+
         # Startup consolidation: catch up on contacts that have samples but no memory
         # (fixes the issue where in-memory counter resets on restart, skipping consolidation)
         asyncio.create_task(self._startup_consolidation_check())
@@ -3009,8 +3380,19 @@ class WhatsAppOrchestrator:
         """Gracefully shut down all services."""
         print("\nShutting down...")
 
+        # Flush any buffered messages before stopping (BUG-002 aggregator)
+        if self.aggregator:
+            try:
+                await self.aggregator.flush_all()
+            except Exception:
+                pass
+
         if self.channel:
             await self.channel.stop()
+
+        # Stop email monitor
+        if self._email_monitor:
+            await self._email_monitor.stop_monitor()
 
         if self.bridge:
             self.bridge.stop()

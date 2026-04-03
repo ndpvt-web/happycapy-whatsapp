@@ -156,7 +156,7 @@ class WhatsAppChannel:
 
         while self._running:
             try:
-                async with websockets.connect(self.bridge_url) as ws:
+                async with websockets.connect(self.bridge_url, max_size=10_000_000) as ws:
                     self._ws = ws
 
                     if self.bridge_token:
@@ -196,7 +196,11 @@ class WhatsAppChannel:
             self._ws = None
 
     async def send_text(self, chat_id: str, text: str) -> None:
-        """Send a text message, splitting if necessary."""
+        """Send a text message, splitting if necessary.
+
+        Supports multi-message separator: lines containing only '|||' split
+        the response into distinct messages sent with a natural delay.
+        """
         if not self._ws or not self._connected:
             print("Bridge not connected, cannot send")
             return
@@ -206,14 +210,25 @@ class WhatsAppChannel:
         # Logs warning if weak signals remain after 3 regex layers.
         if self._LEAK_DETECTOR_RE.search(text):
             print("[warning] Possible reasoning leak detected in outbound message (post-filter)")
-        # Convert Markdown to WhatsApp formatting (Issue 4)
-        text = self._convert_markdown_to_whatsapp(text)
-        max_len = self.config.get("max_message_length", 4000)
-        chunks = self._split_message(text, max_len) if len(text) > max_len else [text]
 
-        for chunk in chunks:
-            payload = {"type": "send", "to": chat_id, "text": chunk}
-            await self._ws.send(json.dumps(payload, ensure_ascii=False))
+        # Multi-message split: '|||' on its own line = separate WhatsApp messages
+        multi_parts = [p.strip() for p in text.split("\n|||\n") if p.strip()]
+        if not multi_parts:
+            multi_parts = [text]
+
+        for i, part in enumerate(multi_parts):
+            # Natural delay between distinct messages (not the first one)
+            if i > 0:
+                await asyncio.sleep(1.5)
+
+            # Convert Markdown to WhatsApp formatting (Issue 4)
+            part = self._convert_markdown_to_whatsapp(part)
+            max_len = self.config.get("max_message_length", 4000)
+            chunks = self._split_message(part, max_len) if len(part) > max_len else [part]
+
+            for chunk in chunks:
+                payload = {"type": "send", "to": chat_id, "text": chunk}
+                await self._ws.send(json.dumps(payload, ensure_ascii=False))
 
     async def send_text_owner_approved(self, chat_id: str, text: str) -> None:
         """Send a text message with ownerApproved flag (for group sends).
