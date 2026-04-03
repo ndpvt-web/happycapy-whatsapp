@@ -166,6 +166,15 @@ class Integration(BaseIntegration):
         )
 
     @classmethod
+    def visibility(cls) -> str:
+        """Only visible when admin is in elevated mode (/break-chains).
+
+        Non-admin contacts and non-elevated admin NEVER see these tools --
+        the LLM has zero knowledge they exist, preventing hallucination.
+        """
+        return "elevated"
+
+    @classmethod
     def tool_definitions(cls) -> list[dict]:
         return _TOOL_DEFINITIONS
 

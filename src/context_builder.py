@@ -192,22 +192,37 @@ class ContextBuilder:
         """Build privacy instructions based on config privacy_level."""
         level = config.get("privacy_level", "strict")
 
+        base = ""
         if level in ("strict", "moderate"):
-            return (
+            base = (
                 "## Privacy Rules\n"
                 "- NEVER share one contact's information with another contact.\n"
                 "- Before sharing personal details (phone, address, finances, health), use `ask_owner` to check.\n"
                 "- Each contact's conversation is private and isolated."
             )
         else:  # relaxed
-            return (
+            base = (
                 "## Privacy Rules\n"
                 "- Protect sensitive data (passwords, finances, medical info) across contacts.\n"
                 "- General information can be shared."
             )
 
-    def _build_integration_instructions(self, config: dict[str, Any]) -> str:
-        """Build integration-specific instructions from enabled integrations."""
+
+        return base
+
+    def _build_integration_instructions(
+        self,
+        config: dict[str, Any],
+        *,
+        is_admin: bool = False,
+        is_elevated: bool = False,
+    ) -> str:
+        """Build integration-specific instructions from enabled integrations.
+
+        Respects visibility guards: admin-only and elevated-only integration
+        prompts are excluded for non-admin/non-elevated senders so the LLM
+        has zero knowledge of tools it cannot use.
+        """
         enabled = config.get("enabled_integrations", ["core"])
         non_core = [n for n in enabled if n != "core"]
         if not non_core:
@@ -218,10 +233,17 @@ class ContextBuilder:
             parts: list[str] = []
             for name in non_core:
                 cls = _INTEGRATIONS.get(name)
-                if cls:
-                    addition = cls.system_prompt_addition(config)
-                    if addition:
-                        parts.append(addition)
+                if not cls:
+                    continue
+                # Apply same visibility filter as tool_executor
+                vis = cls.visibility() if hasattr(cls, "visibility") else "all"
+                if vis == "admin" and not is_admin:
+                    continue
+                if vis == "elevated" and not is_elevated:
+                    continue
+                addition = cls.system_prompt_addition(config)
+                if addition:
+                    parts.append(addition)
             return "\n\n".join(parts)
         except Exception:
             return ""
@@ -248,6 +270,8 @@ class ContextBuilder:
         recent_history: str = "",
         contact_profile: str = "",
         rag_context: str = "",
+        is_admin: bool = False,
+        is_elevated: bool = False,
     ) -> str:
         """Build the full system prompt from all context layers.
 
@@ -257,6 +281,8 @@ class ContextBuilder:
             recent_history: Recent HISTORY.md entries.
             contact_profile: Per-contact profile context.
             rag_context: RAG conversation history results.
+            is_admin: Whether the current sender is admin.
+            is_elevated: Whether admin is in elevated mode.
 
         Returns:
             Complete system prompt string.
@@ -308,7 +334,10 @@ class ContextBuilder:
             parts.append(f"## Relevant Conversation History\n{rag_context}")
 
         # Layer 10: Integration-specific instructions (from enabled integrations)
-        integration_prompt = self._build_integration_instructions(config)
+        # Visibility-filtered: admin/elevated prompts excluded for non-admin senders
+        integration_prompt = self._build_integration_instructions(
+            config, is_admin=is_admin, is_elevated=is_elevated,
+        )
         if integration_prompt:
             parts.append(integration_prompt)
 

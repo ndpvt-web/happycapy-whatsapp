@@ -258,15 +258,42 @@ class ToolExecutor:
         except Exception as e:
             print(f"[tool-executor] Failed to load integrations: {type(e).__name__}: {e}")
 
-    def get_tool_definitions(self) -> list[dict]:
-        """Get all tool definitions: core + integration tools."""
+    def get_tool_definitions(
+        self,
+        *,
+        sender_id: str = "",
+        is_admin: bool = False,
+        is_elevated: bool = False,
+    ) -> list[dict]:
+        """Get tool definitions filtered by sender visibility.
+
+        Programmatic guard: the LLM NEVER sees tools it shouldn't use.
+        - visibility="all": everyone sees these tools
+        - visibility="admin": only admin sees these tools
+        - visibility="elevated": only admin in elevated mode sees these tools
+
+        Args:
+            sender_id: JID of the message sender.
+            is_admin: Whether the sender is the admin.
+            is_elevated: Whether admin has activated /break-chains mode.
+        """
         all_defs = list(TOOL_DEFINITIONS)
         for integ in self._integrations.values():
+            vis = integ.visibility() if hasattr(integ, "visibility") else "all"
+            if vis == "admin" and not is_admin:
+                continue
+            if vis == "elevated" and not is_elevated:
+                continue
             all_defs.extend(integ.tool_definitions())
         return all_defs
 
-    async def execute(self, tool_name: str, arguments: dict[str, Any]) -> ToolResult:
+    async def execute(self, tool_name: str, arguments: dict[str, Any], *, sender_id: str = "") -> ToolResult:
         """Execute a tool by name and return the result.
+
+        Args:
+            tool_name: The tool to execute.
+            arguments: Tool arguments from the LLM.
+            sender_id: JID of the message sender (for per-request context like privacy).
 
         Never raises -- all exceptions are caught and returned as ToolResult with success=False.
         """
@@ -281,7 +308,8 @@ class ToolExecutor:
 
         try:
             if tool_name in self._integration_tools:
-                # Integration handler: handler is an integration instance
+                # Integration handler: set per-request context, then execute
+                handler.set_request_context(sender_jid=sender_id)
                 return await handler.execute(tool_name, arguments)
             else:
                 # Core handler: handler is a bound method
