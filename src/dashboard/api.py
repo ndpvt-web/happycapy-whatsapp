@@ -1584,7 +1584,7 @@ def _dashboard_url(request) -> str:
 
 
 @app.get("/api/oauth/start/{app_id}")
-async def oauth_start(app_id: str, request):
+async def oauth_start(app_id: str, request: Request):
     """Redirect user to OAuth consent screen for the given app.
 
     Creates a state nonce (CSRF guard), builds the provider's authorization
@@ -1624,7 +1624,7 @@ async def oauth_start(app_id: str, request):
 
 
 @app.get("/api/oauth/callback/{app_id}")
-async def oauth_callback(app_id: str, request, code: str = None, state: str = None, error: str = None):
+async def oauth_callback(app_id: str, request: Request, code: str = None, state: str = None, error: str = None):
     """Handle OAuth callback. Exchange code for tokens, store, redirect to dashboard.
 
     This is where the provider redirects after user approval.
@@ -1727,7 +1727,7 @@ def auth_status_legacy():
 
 
 @app.post("/api/auth/token")
-async def save_token_legacy(request):
+async def save_token_legacy(request: Request):
     """Legacy token save — stores manual API tokens (GitHub, Trello, etc.)."""
     manager = _get_oauth_manager()
     if not manager:
@@ -1757,7 +1757,7 @@ async def save_token_legacy(request):
 
 
 @app.delete("/api/auth/token")
-async def delete_token_legacy(request):
+async def delete_token_legacy(request: Request):
     """Legacy token delete."""
     manager = _get_oauth_manager()
     if not manager:
