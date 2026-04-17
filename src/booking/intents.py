@@ -16,7 +16,7 @@ Also handles inbound routing:
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Optional
 
 from .models import BookingRecord, BookingIntent, BookingState
 from .context import format_owner_context
@@ -195,15 +195,18 @@ class BookingIntentFulfiller:
 
     async def route_admin_reply(
         self, content: str, sender_id: str
-    ) -> bool:
+    ) -> Optional[BookingRecord]:
         """Try to route an admin reply to a pending booking approval.
 
-        Returns True if handled (caller should not process further).
+        Returns the updated BookingRecord if handled (caller should not process
+        further), or None if this message was not a booking-related reply.
+        The returned record reflects the post-transition state — callers must
+        not use any previously held BookingRecord reference after this call.
         """
         # Find bookings awaiting owner approval
         pending = self._engine.get_awaiting_owner_approval()
         if not pending:
-            return False
+            return None
 
         # If admin explicitly references a booking ID, use that
         bkg_match = re.search(r"\[?(BKG-\d+)\]?", content, re.IGNORECASE)
@@ -215,7 +218,7 @@ class BookingIntentFulfiller:
             booking = pending[0] if len(pending) == 1 else None
 
         if not booking:
-            return False
+            return None
 
         content_lower = content.strip().lower()
 
@@ -223,24 +226,26 @@ class BookingIntentFulfiller:
             # Extract reason after "no"
             reason = re.sub(r"^(no|reject|decline|cancel|not now|don't book)[,\s]*", "", content_lower, flags=re.IGNORECASE).strip()
             await self._engine.owner_rejected(booking, reason=reason)
-            return True
+            return booking  # booking is mutated in-place by owner_rejected
 
         if _APPROVE_RE.search(content_lower):
             await self._engine.owner_approved(booking)
-            return True
+            return booking  # booking is mutated in-place by owner_approved
 
-        return False
+        return None
 
     async def route_contact_reply(
         self, contact_id: str, content: str
-    ) -> bool:
+    ) -> Optional[BookingRecord]:
         """Try to route a contact's reply to a booking in TIMES_PROPOSED state.
 
-        Returns True if handled.
+        Returns the updated BookingRecord if handled, or None if not handled.
+        The returned record reflects the post-transition state — callers must
+        not use any previously held BookingRecord reference after this call.
         """
         booking = self._engine.get_active_for_contact(contact_id)
         if not booking or booking.state != BookingState.TIMES_PROPOSED:
-            return False
+            return None
 
         # Check if contact is picking a slot number (1-5)
         slot_match = _SLOT_RE.search(content.strip())
@@ -249,15 +254,15 @@ class BookingIntentFulfiller:
             if 0 <= slot_idx < len(booking.proposed_slots):
                 chosen = booking.proposed_slots[slot_idx]
                 await self._engine.contact_replied(booking, chosen)
-                return True
+                return booking  # booking is mutated in-place by contact_replied
 
         # Check for cancellation keywords
         cancel_re = re.compile(r"\b(cancel|never mind|forget it|don't bother)\b", re.IGNORECASE)
         if cancel_re.search(content) and booking.state == BookingState.BOOKING_CONFIRMED:
             await self._engine.contact_cancelled(booking)
-            return True
+            return booking  # booking is mutated in-place by contact_cancelled
 
-        return False
+        return None
 
 
 def _to_jid(phone: str) -> str:

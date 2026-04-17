@@ -1079,10 +1079,11 @@ class WhatsAppOrchestrator:
 
         # ── Booking: admin approval routing ──
         # When admin replies to a booking notification, route to engine (yes/no).
+        # route_admin_reply returns the updated BookingRecord (truthy) or None.
         if sender_is_admin and self.booking_fulfiller:
             try:
-                _bkg_handled = await self.booking_fulfiller.route_admin_reply(content, sender_id)
-                if _bkg_handled:
+                _bkg_routed = await self.booking_fulfiller.route_admin_reply(content, sender_id)
+                if _bkg_routed:
                     cleanup_temp_files(*temp_files_to_cleanup)
                     return
             except Exception as _e:
@@ -1090,15 +1091,17 @@ class WhatsAppOrchestrator:
 
         # ── Booking: contact slot-choice routing ──
         # When a contact replies with a slot number, advance booking state automatically.
+        # route_contact_reply returns the updated BookingRecord (truthy) or None.
         if not sender_is_admin and self.booking_fulfiller:
             try:
-                _bkg_contact_handled = await self.booking_fulfiller.route_contact_reply(
+                _bkg_routed = await self.booking_fulfiller.route_contact_reply(
                     sender_id, content
                 )
-                if _bkg_contact_handled:
+                if _bkg_routed:
                     # Contact picked a slot — LLM should now call notify_owner_meeting_request
                     # so let it continue to AI processing with an enriched hint
-                    print(f"[booking] Contact slot choice routed for {sender_id}")
+                    print(f"[booking] Contact slot choice routed for {sender_id}: "
+                          f"{_bkg_routed.id} → {_bkg_routed.state.value}")
             except Exception as _e:
                 print(f"[booking] Contact reply routing error: {_e}")
 
