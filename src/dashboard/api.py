@@ -4,6 +4,7 @@ Exposes read/write endpoints over the bot's SQLite databases, config,
 spreadsheets, memory files, and health metrics.
 """
 
+import asyncio
 import hashlib
 import json
 import os
@@ -16,7 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -1772,6 +1773,141 @@ async def delete_token_legacy(request):
         raise
     except Exception as e:
         raise HTTPException(500, str(e))
+
+
+# ══════════════════════════════════════════════════════════════
+# PAYMENT WEBHOOKS
+# ══════════════════════════════════════════════════════════════
+
+async def _send_via_bridge(jid: str, text: str) -> bool:
+    """Send a WhatsApp message via bridge WebSocket (for use outside main process)."""
+    try:
+        import websockets
+    except ImportError:
+        print("[webhook] websockets not installed")
+        return False
+
+    cfg = json.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.exists() else {}
+    port = cfg.get("bridge_port", 3002)
+    token = cfg.get("bridge_token", "")
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+
+    try:
+        async with websockets.connect(
+            f"ws://localhost:{port}",
+            additional_headers=headers,
+            open_timeout=5,
+        ) as ws:
+            import json as _json
+            await ws.send(_json.dumps({"type": "send", "to": jid, "text": text}))
+            await asyncio.wait_for(ws.recv(), timeout=10.0)
+        return True
+    except Exception as e:
+        print(f"[webhook/bridge] Failed to send WhatsApp to {jid}: {e}")
+        return False
+
+
+@app.post("/webhooks/stripe")
+async def stripe_webhook(request: Request):
+    """Handle Stripe payment events (payment_intent.succeeded, checkout.session.completed)."""
+    import hmac as _hmac
+    import hashlib as _hashlib
+
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+    webhook_secret = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+
+    if webhook_secret:
+        try:
+            import stripe as _stripe
+            event = _stripe.Webhook.construct_event(payload, sig_header, webhook_secret)
+        except Exception as e:
+            print(f"[stripe webhook] Signature verification failed: {e}")
+            raise HTTPException(400, "Invalid signature")
+    else:
+        # No secret configured — parse without verification (dev mode)
+        try:
+            event = json.loads(payload)
+        except Exception:
+            raise HTTPException(400, "Invalid JSON")
+
+    event_type = event.get("type", "")
+    print(f"[stripe webhook] Event: {event_type}")
+
+    if event_type == "checkout.session.completed":
+        session = event.get("data", {}).get("object", {})
+        payment_status = session.get("payment_status", "")
+        session_id = session.get("id", "")
+        metadata = session.get("metadata", {})
+        contact_phone = metadata.get("contact_phone", "")
+
+        if payment_status == "paid" and session_id:
+            from src.integrations.payments import mark_paid, get_link_by_id
+            row = mark_paid(session_id)
+            if row and row.get("contact_jid"):
+                amount = row["amount"]
+                currency = row["currency"]
+                desc = row["description"]
+                msg = (
+                    f"Payment received! Thank you.\n"
+                    f"Amount: {currency} {amount:.2f}\n"
+                    f"For: {desc}\n"
+                    f"Your booking is confirmed."
+                )
+                await _send_via_bridge(row["contact_jid"], msg)
+                print(f"[stripe webhook] Payment confirmed: {session_id} → {contact_phone}")
+
+    return JSONResponse({"received": True})
+
+
+@app.post("/webhooks/razorpay")
+async def razorpay_webhook(request: Request):
+    """Handle Razorpay payment link events (payment_link.paid)."""
+    import hmac as _hmac
+    import hashlib as _hashlib
+
+    payload = await request.body()
+    sig_header = request.headers.get("x-razorpay-signature", "")
+    webhook_secret = os.environ.get("RAZORPAY_WEBHOOK_SECRET", "")
+
+    if webhook_secret and sig_header:
+        expected = _hmac.new(
+            webhook_secret.encode(), payload, _hashlib.sha256
+        ).hexdigest()
+        if not _hmac.compare_digest(expected, sig_header):
+            print("[razorpay webhook] Signature verification failed")
+            raise HTTPException(400, "Invalid signature")
+
+    try:
+        event = json.loads(payload)
+    except Exception:
+        raise HTTPException(400, "Invalid JSON")
+
+    event_type = event.get("event", "")
+    print(f"[razorpay webhook] Event: {event_type}")
+
+    if event_type == "payment_link.paid":
+        pl = event.get("payload", {}).get("payment_link", {}).get("entity", {})
+        link_id = pl.get("id", "")
+        notes = pl.get("notes", {})
+
+        if link_id:
+            from src.integrations.payments import mark_paid
+            row = mark_paid(link_id)
+            if row and row.get("contact_jid"):
+                amount = row["amount"]
+                currency = row["currency"]
+                desc = row["description"]
+                msg = (
+                    f"Payment received! Thank you.\n"
+                    f"Amount: {currency} {amount:.0f}\n"
+                    f"For: {desc}\n"
+                    f"Your booking is confirmed."
+                )
+                await _send_via_bridge(row["contact_jid"], msg)
+                print(f"[razorpay webhook] Payment confirmed: {link_id}")
+
+    return JSONResponse({"received": True})
 
 
 # Mount static assets (JS/CSS bundles)
