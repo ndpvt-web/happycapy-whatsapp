@@ -33,16 +33,22 @@ class AdminModeManager:
 
     def __init__(self, timeout_s: int = DEFAULT_TIMEOUT_S):
         self._timeout_s = timeout_s
-        # JID -> {"activated_at": float, "last_used": float}
+        # normalized JID -> {"activated_at": float, "last_used": float}
         self._elevated: dict[str, dict[str, float]] = {}
         # Audit log: list of (timestamp, jid, action, detail)
         self._audit_log: list[tuple[float, str, str, str]] = []
+
+    @staticmethod
+    def _normalize_jid(jid: str) -> str:
+        """Strip @s.whatsapp.net suffix so digits-only and full JID both match."""
+        return jid.split("@")[0] if "@" in jid else jid
 
     def activate(self, jid: str) -> str:
         """Activate elevated mode for an admin JID.
 
         Returns a confirmation message.
         """
+        jid = self._normalize_jid(jid)
         now = time.time()
         self._elevated[jid] = {"activated_at": now, "last_used": now}
         self._audit_log.append((now, jid, "activate", "Elevated mode activated"))
@@ -55,6 +61,7 @@ class AdminModeManager:
 
     def deactivate(self, jid: str) -> str:
         """Deactivate elevated mode for an admin JID."""
+        jid = self._normalize_jid(jid)
         was_active = jid in self._elevated
         self._elevated.pop(jid, None)
         self._audit_log.append((time.time(), jid, "deactivate", "Elevated mode deactivated"))
@@ -64,6 +71,7 @@ class AdminModeManager:
 
     def is_elevated(self, jid: str) -> bool:
         """Check if a JID is in elevated mode (with auto-expiry)."""
+        jid = self._normalize_jid(jid)
         state = self._elevated.get(jid)
         if not state:
             return False
@@ -81,6 +89,7 @@ class AdminModeManager:
 
     def get_status(self, jid: str) -> dict[str, Any]:
         """Get elevated mode status for display."""
+        jid = self._normalize_jid(jid)
         state = self._elevated.get(jid)
         if not state:
             return {"active": False}

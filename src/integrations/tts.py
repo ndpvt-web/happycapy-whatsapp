@@ -95,6 +95,32 @@ _TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "clone_voice",
+            "description": (
+                "Clone a voice from an audio file and save it as the admin's personal voice. "
+                "Use when Nivesh sends a voice note and asks to 'clone my voice', 'use my voice', "
+                "'set this as my voice', or 'voice clone'. "
+                "The cloned voice will be used automatically for all future TTS replies to Nivesh."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "audio_path": {
+                        "type": "string",
+                        "description": "Path to the audio file to clone the voice from.",
+                    },
+                    "voice_name": {
+                        "type": "string",
+                        "description": "Name for the cloned voice. Default: 'NiveshVoice'.",
+                    },
+                },
+                "required": ["audio_path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "generate_audio",
             "description": (
                 "Generate a speech audio file from text without sending it. "
@@ -142,27 +168,17 @@ class Integration(BaseIntegration):
         self._sender_jid = sender_jid
 
     def _resolve_voice_for_recipient(self, voice_arg: str) -> str:
-        """Resolve voice ID, using admin's cloned voice when sending to admin.
-
-        If config has 'admin_voice_id' and the current sender is admin,
-        use the cloned voice unless a specific voice was explicitly requested.
-        """
-        # Check if sender is admin and no explicit voice override
-        admin_number = self.config.get("admin_number", "")
+        """Resolve voice ID. Uses admin_voice_id as the global default when set."""
         admin_voice_id = self.config.get("admin_voice_id", "")
 
-        if (
-            admin_voice_id
-            and admin_number
-            and admin_number in self._sender_jid
-            and voice_arg in ("donny", "")  # Only override default voice
-        ):
+        # If no explicit voice requested and a cloned voice is configured, use it always
+        if admin_voice_id and voice_arg in ("donny", ""):
             return admin_voice_id
 
-        # Standard resolution
+        # Explicit voice requested — resolve from presets or treat as raw ID
         voice_id = VOICE_PRESETS.get(voice_arg, voice_arg)
         if not voice_id or len(voice_id) < 10:
-            voice_id = DEFAULT_VOICE_ID
+            voice_id = admin_voice_id or DEFAULT_VOICE_ID
         return voice_id
 
     @classmethod
@@ -191,12 +207,15 @@ class Integration(BaseIntegration):
             "Supports multiple languages: en, zh, hi, es, fr, de, ja, ko, etc.\n\n"
             "Write text as natural speech -- no markdown, no bullets, no formatting.\n"
             "Use `generate_audio` when you need the file path without sending it.\n"
+            "Use `clone_voice` when Nivesh sends a voice note and asks to clone his voice -- "
+            "pass the transcribed audio file path. The cloned voice is saved permanently.\n"
         )
 
     async def execute(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         handlers = {
             "speak": self._speak,
             "generate_audio": self._generate_audio,
+            "clone_voice": self._clone_voice,
         }
         handler = handlers.get(tool_name)
         if not handler:
@@ -258,9 +277,9 @@ class Integration(BaseIntegration):
 
         language = args.get("language", "en").strip().lower()
 
-        api_key = os.environ.get("CARTESIA_API_KEY", "")
+        api_key = self.config.get("cartesia_api_key", "") or os.environ.get("CARTESIA_API_KEY", "")
         if not api_key:
-            return ToolResult(False, tool_name, "Cartesia API key not configured (CARTESIA_API_KEY)")
+            return ToolResult(False, tool_name, "Cartesia API key not configured (cartesia_api_key in config or CARTESIA_API_KEY env)")
 
         headers = {
             "X-API-Key": api_key,
@@ -318,3 +337,66 @@ class Integration(BaseIntegration):
             return ToolResult(False, tool_name, f"TTS generation timed out ({TTS_TIMEOUT}s)")
         except Exception as e:
             return ToolResult(False, tool_name, f"TTS error: {type(e).__name__}: {e}")
+
+    async def _clone_voice(self, args: dict[str, Any]) -> ToolResult:
+        """Clone a voice from an audio file and save the ID to config."""
+        if not httpx:
+            return ToolResult(False, "clone_voice", "httpx not installed")
+
+        audio_path = args.get("audio_path", "").strip()
+        if not audio_path or not Path(audio_path).exists():
+            return ToolResult(False, "clone_voice", f"Audio file not found: {audio_path}")
+
+        voice_name = args.get("voice_name", "NiveshVoice").strip() or "NiveshVoice"
+
+        api_key = self.config.get("cartesia_api_key", "") or os.environ.get("CARTESIA_API_KEY", "")
+        if not api_key:
+            return ToolResult(False, "clone_voice", "Cartesia API key not configured")
+
+        headers = {
+            "X-API-Key": api_key,
+            "Cartesia-Version": CARTESIA_VERSION,
+        }
+
+        try:
+            audio_bytes = Path(audio_path).read_bytes()
+            # Detect format from extension
+            ext = Path(audio_path).suffix.lower().lstrip(".")
+            mime = {"mp3": "audio/mpeg", "ogg": "audio/ogg", "wav": "audio/wav",
+                    "m4a": "audio/mp4", "opus": "audio/ogg"}.get(ext, "audio/mpeg")
+
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    f"{CARTESIA_VOICES_URL}/clone",
+                    headers=headers,
+                    data={"name": voice_name, "enhance": "true", "language": "en",
+                          "description": "Admin's personal cloned voice"},
+                    files={"clip": (Path(audio_path).name, audio_bytes, mime)},
+                    timeout=120,
+                )
+
+            if resp.status_code not in (200, 201):
+                return ToolResult(False, "clone_voice", f"Cartesia clone error ({resp.status_code}): {resp.text[:300]}")
+
+            data = resp.json()
+            voice_id = data.get("id", "")
+            if not voice_id:
+                return ToolResult(False, "clone_voice", f"No voice ID in response: {data}")
+
+            # Persist voice ID to config.json
+            import json
+            config_path = Path.home() / ".happycapy-whatsapp" / "config.json"
+            if config_path.exists():
+                cfg = json.loads(config_path.read_text())
+                cfg["admin_voice_id"] = voice_id
+                config_path.write_text(json.dumps(cfg, indent=2))
+                self.config["admin_voice_id"] = voice_id  # Update live config too
+
+            return ToolResult(
+                True, "clone_voice",
+                f"Voice cloned successfully! Voice ID: {voice_id}\n"
+                f"Saved as '{voice_name}'. Future TTS replies to you will use your cloned voice.",
+            )
+
+        except Exception as e:
+            return ToolResult(False, "clone_voice", f"Clone error: {type(e).__name__}: {e}")

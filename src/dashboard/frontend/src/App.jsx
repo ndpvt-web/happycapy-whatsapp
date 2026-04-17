@@ -2,7 +2,7 @@ import { useState } from 'react';
 import {
   LayoutDashboard, Users, MessageSquare, FileSpreadsheet,
   Settings, Brain, Activity, Shield, RefreshCw, ChevronRight,
-  Send, Bell, Calendar, Zap, Smartphone, UsersRound, Radio
+  Send, Bell, Calendar, Zap, Smartphone, UsersRound, Radio, Blocks
 } from 'lucide-react';
 import Overview from './pages/Overview';
 import WhatsAppPage from './pages/WhatsApp';
@@ -16,6 +16,7 @@ import Intelligence from './pages/Intelligence';
 import Identity from './pages/Identity';
 import Config from './pages/Config';
 import Logs from './pages/Logs';
+import Apps from './pages/Apps';
 
 const NAV = [
   { id: 'overview', label: 'Overview', icon: LayoutDashboard },
@@ -28,6 +29,7 @@ const NAV = [
   { id: 'spreadsheets', label: 'Spreadsheets', icon: FileSpreadsheet },
   { id: 'intelligence', label: 'Intelligence', icon: Brain },
   { id: 'identity', label: 'Identity', icon: Shield },
+  { id: 'apps', label: 'Connected Apps', icon: Blocks },
   { id: 'config', label: 'Configuration', icon: Settings },
   { id: 'logs', label: 'Live Logs', icon: Activity },
 ];
@@ -40,11 +42,11 @@ function Sidebar({ active, onNav }) {
       <div className="px-5 py-5 flex items-center gap-3">
         <div className="w-9 h-9 rounded-xl flex items-center justify-center text-lg font-bold"
           style={{ background: 'var(--accent-dim)', color: 'var(--accent)' }}>
-          H
+          A
         </div>
         <div>
-          <div className="text-sm font-semibold tracking-tight">HappyCapy</div>
-          <div className="text-xs" style={{ color: 'var(--text-dim)' }}>WhatsApp Dashboard</div>
+          <div className="text-sm font-semibold tracking-tight">Aegis</div>
+          <div className="text-xs" style={{ color: 'var(--text-dim)' }}>Personal Assistant</div>
         </div>
       </div>
 
@@ -86,6 +88,7 @@ export default function App() {
     spreadsheets: <Spreadsheets />,
     intelligence: <Intelligence />,
     identity: <Identity />,
+    apps: <Apps />,
     config: <Config />,
     logs: <Logs />,
   };

@@ -123,6 +123,26 @@ def start_foreground() -> None:
         remove_pid()
 
 
+def _inject_env_from_bashrc(env: dict) -> None:
+    """Inject exported env vars from .bashrc that the daemon may not inherit."""
+    bashrc = Path.home() / ".bashrc"
+    if not bashrc.exists():
+        return
+    try:
+        for line in bashrc.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("export ") and "=" in line:
+                # Parse: export KEY="value" or export KEY=value
+                kv = line[7:].strip()  # strip "export "
+                key, _, val = kv.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and val and key not in env:
+                    env[key] = val
+    except Exception:
+        pass  # Non-critical -- fail silently
+
+
 def _supervise_loop() -> None:
     """Main supervision loop - restart orchestrator on crash."""
     restart_count = 0
@@ -145,6 +165,8 @@ def _supervise_loop() -> None:
         try:
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
+            # Source critical tokens from .bashrc that may not be in daemon env
+            _inject_env_from_bashrc(env)
             proc = subprocess.Popen(
                 [sys.executable, "-u", "-m", "src.main"],
                 cwd=str(SKILL_DIR),

@@ -12,6 +12,7 @@ Security: All tools check admin status AND elevated mode before execution.
 from typing import Any
 
 from .base import BaseIntegration, IntegrationInfo
+from src.config_manager import is_admin
 from src.tool_executor import ToolResult
 
 
@@ -80,11 +81,11 @@ _TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
-            "name": "create_followup_job",
+            "name": "create_job_for_contact",
             "description": (
-                "Create a follow-up job for a contact. Use when you need to get back to someone "
-                "later -- after getting info from admin, after processing, or after a delay. "
-                "The job queue will track it and prompt you to deliver the reply proactively."
+                "Create a follow-up job targeting a SPECIFIC contact by name or number. "
+                "Admin elevated mode only. Use when admin says 'follow up with X about Y' "
+                "or 'remind me to message X'. Requires contact_query to identify the target."
             ),
             "parameters": {
                 "type": "object",
@@ -101,6 +102,10 @@ _TOOL_DEFINITIONS: list[dict] = [
                         "type": "string",
                         "enum": ["followup", "research", "confirmation", "delivery"],
                         "description": "Type of job for tracking.",
+                    },
+                    "needs_admin": {
+                        "type": "boolean",
+                        "description": "Set true if this job requires the owner's input before it can be completed.",
                     },
                 },
                 "required": ["contact_query", "description"],
@@ -145,17 +150,19 @@ class Integration(BaseIntegration):
 
     def set_request_context(self, *, sender_jid: str = "", **kwargs: Any) -> None:
         self._sender_jid = sender_jid
+        self._chat_id = kwargs.get("chat_id", "")
 
     def _is_admin(self) -> bool:
-        admin = self.config.get("admin_number", "")
-        return bool(admin and admin in self._sender_jid)
+        return is_admin(self.config, self._sender_jid)
 
     def _is_elevated(self) -> bool:
         if not self._is_admin():
             return False
         if not self._admin_mode:
             return False
-        return self._admin_mode.is_elevated(self._sender_jid)
+        # Check using chat_id (LID) which is the key used by activate()
+        check_id = self._chat_id or self._sender_jid
+        return self._admin_mode.is_elevated(check_id)
 
     @classmethod
     def info(cls) -> IntegrationInfo:
@@ -185,11 +192,13 @@ class Integration(BaseIntegration):
             "When the admin activates /break-chains, you gain access to:\n"
             "- `access_contact_memory`: Look up any contact's memory, history, or profile by name/number\n"
             "- `search_across_contacts`: Search keywords across ALL contacts' conversations\n"
-            "- `create_followup_job`: Queue a follow-up task for a contact (proactive delivery later)\n"
+            "- `create_job_for_contact`: Queue a follow-up task targeting a specific contact by name/number\n"
             "- `list_pending_jobs`: See all queued follow-up tasks\n\n"
-            "These tools ONLY work when elevated mode is active.\n"
-            "Use access_contact_memory when admin asks about any contact.\n"
-            "Use create_followup_job when you need to defer a reply to a contact.\n\n"
+            "These tools ONLY work when elevated mode is active.\n\n"
+            "RULE: When admin asks about a person by name or description, call `access_contact_memory` FIRST "
+            "before writing any text response. Do NOT say 'I don't have info' -- call the tool first.\n"
+            "RULE: When admin asks to follow up with someone, call `create_job_for_contact` FIRST.\n"
+            "RULE: When admin asks to search across contacts, call `search_across_contacts` FIRST.\n\n"
             "## Multi-Message Responses\n\n"
             "You can send multiple distinct messages by separating them with `|||` on its own line.\n"
             "Use this when:\n"
@@ -205,22 +214,17 @@ class Integration(BaseIntegration):
         )
 
     async def execute(self, tool_name: str, arguments: dict[str, Any]) -> Any:
-        # Job management tools available to admin without elevation
-        if tool_name in ("create_followup_job", "list_pending_jobs"):
-            if not self._is_admin():
-                return ToolResult(False, tool_name, "Admin-only tool.")
-        else:
-            # Memory access tools require elevated mode
-            if not self._is_elevated():
-                return ToolResult(
-                    False, tool_name,
-                    "Elevated mode not active. Admin must send /break-chains first."
-                )
+        # All admin tools require elevated mode
+        if not self._is_elevated():
+            return ToolResult(
+                False, tool_name,
+                "Elevated mode not active. Admin must send /break-chains first."
+            )
 
         handlers = {
             "access_contact_memory": self._access_contact_memory,
             "search_across_contacts": self._search_across_contacts,
-            "create_followup_job": self._create_followup_job,
+            "create_job_for_contact": self._create_job_for_contact,
             "list_pending_jobs": self._list_pending_jobs,
         }
         handler = handlers.get(tool_name)
@@ -335,16 +339,16 @@ class Integration(BaseIntegration):
         header = f"## Cross-Contact Search: '{query}'\nFound {len(results)} result(s):\n"
         return ToolResult(True, "search_across_contacts", header + "\n".join(results[:max_results]))
 
-    async def _create_followup_job(self, args: dict) -> ToolResult:
+    async def _create_job_for_contact(self, args: dict) -> ToolResult:
         contact_query = args.get("contact_query", "").strip()
         description = args.get("description", "").strip()
         job_type = args.get("job_type", "followup")
 
         if not contact_query or not description:
-            return ToolResult(False, "create_followup_job", "Missing contact_query or description.")
+            return ToolResult(False, "create_job_for_contact", "Missing contact_query or description.")
 
         if not self._job_queue:
-            return ToolResult(False, "create_followup_job", "Job queue not available.")
+            return ToolResult(False, "create_job_for_contact", "Job queue not available.")
 
         # Resolve contact
         contact_jid = contact_query
@@ -355,16 +359,19 @@ class Integration(BaseIntegration):
                 contact_jid = matches[0].get("jid", contact_query)
                 contact_name = matches[0].get("best_name", contact_query)
 
+        needs_admin = bool(args.get("needs_admin", False))
         job_id = self._job_queue.create_job(
             contact_jid=contact_jid,
             contact_name=contact_name,
             description=description,
             job_type=job_type,
+            needs_admin=needs_admin,
         )
 
+        status_note = " (waiting for owner input)" if needs_admin else " (will be processed automatically)"
         return ToolResult(
-            True, "create_followup_job",
-            f"Follow-up job #{job_id} created for {contact_name}. "
+            True, "create_job_for_contact",
+            f"Follow-up job #{job_id} created for {contact_name}.{status_note} "
             f"Type: {job_type}. Description: {description[:100]}"
         )
 

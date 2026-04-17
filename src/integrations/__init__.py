@@ -1,23 +1,40 @@
-"""Integration loader for HappyCapy WhatsApp bot."""
+"""Auto-discovery integration loader for HappyCapy WhatsApp bot.
 
+Plugin Architecture (Aristotelian):
+- Material: Each plugin is a single .py file in this directory
+- Formal: Must export an `Integration` class extending BaseIntegration
+- Efficient: This loader scans the directory, imports matching files, registers them
+- Final: Drop a file = it works. Delete a file = everything keeps working.
+
+NO manual imports. NO hardcoded integration names. Pure auto-discovery.
+"""
+
+import importlib
+import pkgutil
+from pathlib import Path
 from typing import Any
 
 from .base import BaseIntegration, IntegrationInfo
 
-# Direct imports with graceful fallback if dependencies missing
+# Auto-discover all integration modules in this directory.
+# Each module that exports an `Integration` class (extending BaseIntegration)
+# is registered automatically. No manual import lines needed.
 _INTEGRATIONS: dict[str, type[BaseIntegration]] = {}
 
-try:
-    from .spreadsheet import Integration as _SpreadsheetIntegration
-    _INTEGRATIONS["spreadsheet"] = _SpreadsheetIntegration
-except ImportError:
-    pass
-
-try:
-    from .email import Integration as _EmailIntegration
-    _INTEGRATIONS["email"] = _EmailIntegration
-except ImportError:
-    pass
+_pkg_dir = Path(__file__).parent
+for _finder, _module_name, _is_pkg in pkgutil.iter_modules([str(_pkg_dir)]):
+    if _module_name.startswith("_") or _module_name == "base":
+        continue
+    try:
+        _mod = importlib.import_module(f".{_module_name}", package=__name__)
+        _cls = getattr(_mod, "Integration", None)
+        if _cls and isinstance(_cls, type) and issubclass(_cls, BaseIntegration):
+            _info = _cls.info()
+            _INTEGRATIONS[_info.name] = _cls
+    except Exception:
+        # Graceful: if a plugin file has import errors, skip it silently.
+        # The plugin simply doesn't exist until its dependencies are met.
+        pass
 
 
 def load_integrations(
@@ -31,7 +48,7 @@ def load_integrations(
     for name in enabled_names:
         cls = _INTEGRATIONS.get(name)
         if not cls:
-            print(f"[integrations] Unknown integration: {name}")
+            # Not an error -- the plugin file simply doesn't exist (yet)
             continue
         try:
             instance = cls(config=config, **kwargs)

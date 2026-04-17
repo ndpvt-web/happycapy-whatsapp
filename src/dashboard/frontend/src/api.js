@@ -1,4 +1,4 @@
-const BASE = '/api';
+const BASE = import.meta.env.VITE_API_URL || '/api';
 
 async function fetchJSON(path, opts) {
   const res = await fetch(`${BASE}${path}`, {
@@ -37,6 +37,7 @@ export const api = {
   cronJobs: () => fetchJSON('/cron'),
   groups: (limit = 500) => fetchJSON(`/groups?limit=${limit}`),
   groupDetail: (jid) => fetchJSON(`/groups/${encodeURIComponent(jid)}`),
+  groupAnalysis: (jid) => fetchJSON(`/groups/${encodeURIComponent(jid)}/analysis`),
   syncGroups: () => fetchJSON('/groups/sync', { method: 'POST' }),
   whatsappStatus: () => fetchJSON('/whatsapp/status'),
   whatsappLogout: () => fetchJSON('/whatsapp/logout', { method: 'POST' }),
@@ -44,5 +45,11 @@ export const api = {
   sendBroadcast: (message, recipients) =>
     fetchJSON('/broadcast', { method: 'POST', body: JSON.stringify({ message, recipients }) }),
   models: () => fetchJSON('/models'),
+  apps: () => fetchJSON('/apps'),
   restart: () => fetchJSON('/restart', { method: 'POST' }),
+  authStatus: () => fetchJSON('/auth/status'),
+  saveToken: (app_id, token, auth_type = 'token') =>
+    fetchJSON('/auth/token', { method: 'POST', body: JSON.stringify({ app_id, token, auth_type }) }),
+  deleteToken: (app_id) =>
+    fetchJSON('/auth/token', { method: 'DELETE', body: JSON.stringify({ app_id }) }),
 };

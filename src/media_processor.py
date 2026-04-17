@@ -32,6 +32,14 @@ try:
 except ImportError:
     pdfplumber = None
 
+try:
+    from faster_whisper import WhisperModel
+except ImportError:
+    WhisperModel = None
+
+# Singleton for local whisper model (loaded once, reused across calls)
+_local_whisper_model: "WhisperModel | None" = None
+
 
 # ── Constants with proofs ──
 
@@ -300,24 +308,53 @@ async def process_video(file_path: str, config: dict) -> dict[str, Any]:
 # ── Audio Transcription ──
 
 
+def _transcribe_local(file_path: str, model_size: str = "base") -> str:
+    """Transcribe audio locally using faster-whisper. Runs on CPU."""
+    global _local_whisper_model
+    if not WhisperModel:
+        return "[Local transcription unavailable - faster-whisper not installed]"
+    try:
+        if _local_whisper_model is None:
+            print(f"[whisper] Loading local model: {model_size}")
+            _local_whisper_model = WhisperModel(model_size, device="cpu", compute_type="int8")
+        segments, info = _local_whisper_model.transcribe(file_path, beam_size=5)
+        text = " ".join(seg.text.strip() for seg in segments)
+        return text if text.strip() else "[Audio contained no speech]"
+    except Exception as e:
+        print(f"Local transcription error: {type(e).__name__}: {e}")
+        return "[Transcription failed]"
+
+
 async def transcribe_audio(
     file_path: str, config: dict, client: "httpx.AsyncClient | None" = None,
 ) -> str:
-    """Transcribe an audio file using the configured Whisper API.
+    """Transcribe an audio file using local whisper or remote API.
 
-    Theorem T_POOL: Reuses shared httpx client when provided (P_POOL).
-    Falls back to creating a one-shot client for backwards compatibility.
+    Routes to local faster-whisper when voice_transcription_provider is "local".
+    Falls back to Groq API otherwise.
     """
+    provider = config.get("voice_transcription_provider", "groq")
+
+    # Local whisper: no API key needed, runs on CPU
+    if provider == "local":
+        model_size = config.get("whisper_model_size", "base")
+        return await asyncio.to_thread(_transcribe_local, file_path, model_size)
+
+    # Remote API path (Groq or other)
     if not httpx:
         return "[Transcription unavailable - httpx not installed]"
-
-    api_key = os.environ.get("AI_GATEWAY_API_KEY", "")
-    if not api_key:
-        return "[Transcription unavailable - no API key]"
 
     whisper_url = config.get(
         "whisper_api_url", "https://api.groq.com/openai/v1/audio/transcriptions"
     )
+
+    # Use GROQ_API_KEY for Groq endpoints, fall back to AI_GATEWAY_API_KEY
+    if "groq.com" in whisper_url:
+        api_key = os.environ.get("GROQ_API_KEY", "") or os.environ.get("AI_GATEWAY_API_KEY", "")
+    else:
+        api_key = os.environ.get("AI_GATEWAY_API_KEY", "")
+    if not api_key:
+        return "[Transcription unavailable - no API key]"
 
     try:
         with open(file_path, "rb") as f:
@@ -340,7 +377,6 @@ async def transcribe_audio(
             else:
                 return f"[Transcription failed: HTTP {resp.status_code}]"
     except Exception as e:
-        # Theorem T_ERRREDACT: Log error type only, not full details (P_LOGPII).
         print(f"Transcription error: {type(e).__name__}")
         return "[Transcription failed]"
 

@@ -26,6 +26,10 @@ CMD="${1:-foreground}"
 case "$CMD" in
     daemon|start)
         echo "Starting HappyCapy WhatsApp in daemon mode (24/7)..."
+        # Pre-clear ports to avoid orphan-bridge EADDRINUSE conflicts
+        lsof -ti :3002 2>/dev/null | xargs kill -9 2>/dev/null || true
+        lsof -ti :8765 2>/dev/null | xargs kill -9 2>/dev/null || true
+        sleep 1
         python3 -m src.daemon start
         ;;
     stop)

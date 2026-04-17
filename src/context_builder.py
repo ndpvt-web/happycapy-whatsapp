@@ -216,37 +216,82 @@ class ContextBuilder:
         *,
         is_admin: bool = False,
         is_elevated: bool = False,
+        runtime_integrations: dict | None = None,
     ) -> str:
-        """Build integration-specific instructions from enabled integrations.
+        """Build integration-specific instructions from all registered integrations.
+
+        Collects system_prompt_addition() from two sources:
+        1. Config-driven integrations (enabled_integrations list)
+        2. Runtime-registered integrations (from tool executor)
 
         Respects visibility guards: admin-only and elevated-only integration
-        prompts are excluded for non-admin/non-elevated senders so the LLM
-        has zero knowledge of tools it cannot use.
+        prompts are excluded for non-admin/non-elevated senders.
         """
+        parts: list[str] = []
+        seen_names: set[str] = set()
+
+        # Source 1: Config-driven integrations
         enabled = config.get("enabled_integrations", ["core"])
         non_core = [n for n in enabled if n != "core"]
-        if not non_core:
-            return ""
-        try:
-            from src.integrations import _INTEGRATIONS
+        if non_core:
+            try:
+                from src.integrations import _INTEGRATIONS
 
-            parts: list[str] = []
-            for name in non_core:
-                cls = _INTEGRATIONS.get(name)
-                if not cls:
+                for name in non_core:
+                    cls = _INTEGRATIONS.get(name)
+                    if not cls:
+                        continue
+                    vis = cls.visibility() if hasattr(cls, "visibility") else "all"
+                    if vis == "admin" and not is_admin:
+                        continue
+                    if vis == "elevated" and not is_elevated:
+                        continue
+                    addition = cls.system_prompt_addition(config)
+                    if addition:
+                        parts.append(addition)
+                    seen_names.add(name)
+            except Exception:
+                pass
+
+        # Source 2: Runtime-registered integrations (tool executor instances)
+        if runtime_integrations:
+            for name, integ in runtime_integrations.items():
+                if name in seen_names:
                     continue
-                # Apply same visibility filter as tool_executor
-                vis = cls.visibility() if hasattr(cls, "visibility") else "all"
+                vis = integ.visibility() if hasattr(integ, "visibility") else "all"
                 if vis == "admin" and not is_admin:
                     continue
                 if vis == "elevated" and not is_elevated:
                     continue
-                addition = cls.system_prompt_addition(config)
-                if addition:
-                    parts.append(addition)
-            return "\n\n".join(parts)
-        except Exception:
-            return ""
+                try:
+                    addition = integ.system_prompt_addition(config)
+                    if addition:
+                        parts.append(addition)
+                except Exception:
+                    pass
+
+        return "\n\n".join(parts)
+
+    def _build_task_completion_rules(self) -> str:
+        """Build anti-deferral rules that ensure the LLM completes tasks or creates jobs."""
+        return (
+            "## Task Completion Rules\n\n"
+            "When this contact asks you to do something:\n"
+            "1. ATTEMPT IT NOW using your available tools. You have up to 5 tool rounds.\n"
+            "2. Use search, calendar, email, spreadsheet, and other tools to complete tasks immediately.\n"
+            "3. Only say 'I'll get back to you' if you GENUINELY need:\n"
+            "   - The owner's input that is not currently available\n"
+            "   - A future time-based delivery (use set_reminder instead)\n"
+            "   - External information that no available tool can fetch right now\n"
+            "4. If you MUST defer: ALWAYS call create_followup_job (needs_admin=true if you need "
+            "the owner, or needs_admin=false if you can handle it yourself later). "
+            "This tool automatically targets the contact you are currently talking to -- "
+            "you cannot and should not specify a different contact. "
+            "NEVER just say 'I'll get back to you' without creating a job -- that is a broken promise.\n"
+            "5. Before creating a job, call get_pending_jobs to check for existing jobs for this contact.\n"
+            "6. NEVER create a follow-up job for something you can complete right now with tools.\n"
+            "7. Prefer completing a task imperfectly NOW over promising a perfect answer later."
+        )
 
     def _build_reasoning_suppression(self) -> str:
         """Build the mandatory reasoning suppression block."""
@@ -262,6 +307,53 @@ class ContextBuilder:
             "Keep responses concise and WhatsApp-native. 1-3 short paragraphs max."
         )
 
+    def _load_identity_modules(
+        self,
+        *,
+        is_admin: bool = False,
+        is_elevated: bool = False,
+        has_voice: bool = False,
+    ) -> str:
+        """Load modular identity files conditionally based on context.
+
+        Skill-like architecture: only load what's relevant per message.
+        Falls back to monolithic SOUL.md if modular files don't exist.
+        """
+        if not (self.identity_dir / "base.md").exists():
+            return self._load_file("SOUL.md")
+
+        parts: list[str] = []
+
+        # Always: core personality (tone mirroring, non-deception)
+        base = self._load_file("base.md")
+        if base:
+            parts.append(base)
+
+        # Context-conditional: admin modules vs contact gates
+        if is_admin:
+            admin = self._load_file("admin.md")
+            if admin:
+                parts.append(admin)
+            if is_elevated:
+                elevated = self._load_file("elevated.md")
+                if elevated:
+                    parts.append(elevated)
+            if has_voice:
+                voice = self._load_file("voice-dump.md")
+                if voice:
+                    parts.append(voice)
+        else:
+            gates = self._load_file("gates.md")
+            if gates:
+                parts.append(gates)
+
+        # Always: response branches, tools, hard rules
+        branches = self._load_file("branches.md")
+        if branches:
+            parts.append(branches)
+
+        return "\n\n".join(parts)
+
     def build_system_prompt(
         self,
         config: dict[str, Any],
@@ -272,6 +364,8 @@ class ContextBuilder:
         rag_context: str = "",
         is_admin: bool = False,
         is_elevated: bool = False,
+        runtime_integrations: dict | None = None,
+        has_voice: bool = False,
     ) -> str:
         """Build the full system prompt from all context layers.
 
@@ -283,6 +377,7 @@ class ContextBuilder:
             rag_context: RAG conversation history results.
             is_admin: Whether the current sender is admin.
             is_elevated: Whether admin is in elevated mode.
+            has_voice: Whether the message includes a voice note.
 
         Returns:
             Complete system prompt string.
@@ -301,10 +396,12 @@ class ContextBuilder:
         # Layer 1: Security anchor (immutable)
         parts.append(self._build_security_anchor())
 
-        # Layer 2: SOUL.md (bot personality)
-        soul = self._load_file("SOUL.md")
-        if soul:
-            parts.append(soul)
+        # Layer 2: Identity modules (conditionally loaded, SOUL.md fallback)
+        identity = self._load_identity_modules(
+            is_admin=is_admin, is_elevated=is_elevated, has_voice=has_voice,
+        )
+        if identity:
+            parts.append(identity)
 
         # Layer 3: USER.md (owner profile)
         user = self._load_file("USER.md")
@@ -333,25 +430,35 @@ class ContextBuilder:
         if rag_context:
             parts.append(f"## Relevant Conversation History\n{rag_context}")
 
-        # Layer 10: Integration-specific instructions (from enabled integrations)
+        # Layer 10: Task completion rules (anti-deferral guardrail)
+        parts.append(self._build_task_completion_rules())
+
+        # Layer 11: Integration-specific instructions (from enabled integrations)
         # Visibility-filtered: admin/elevated prompts excluded for non-admin senders
         integration_prompt = self._build_integration_instructions(
             config, is_admin=is_admin, is_elevated=is_elevated,
+            runtime_integrations=runtime_integrations,
         )
         if integration_prompt:
             parts.append(integration_prompt)
 
-        # Layer 11: Reasoning suppression (always last - most salient)
+        # Layer 12: Reasoning suppression (always last - most salient)
         parts.append(self._build_reasoning_suppression())
 
         return "\n\n---\n\n".join(parts)
 
     def get_identity_paths(self) -> dict[str, Path]:
         """Return paths to identity files (for admin commands)."""
-        return {
+        paths = {
             "SOUL.md": self.identity_dir / "SOUL.md",
             "USER.md": self.identity_dir / "USER.md",
         }
+        for name in ("base.md", "gates.md", "admin.md", "elevated.md",
+                     "voice-dump.md", "branches.md"):
+            p = self.identity_dir / name
+            if p.exists():
+                paths[name] = p
+        return paths
 
     def get_identity_summary(self) -> str:
         """Return a summary of loaded identity files (for /identity command)."""

@@ -71,21 +71,32 @@ class JobQueue:
         context: dict | None = None,
         escalation_code: str | None = None,
         expires_hours: float = 48,
+        needs_admin: bool = False,
     ) -> int:
-        """Create a new job. Returns the job ID."""
+        """Create a new job. Returns the job ID.
+
+        Args:
+            needs_admin: If True, job requires admin input before completion.
+                         Consumer loop will skip it until admin responds.
+        """
         now = time.time()
         expires_at = now + (expires_hours * 3600) if expires_hours > 0 else None
+        ctx = dict(context or {})
+        if needs_admin:
+            ctx["needs_admin"] = True
+        status = "waiting_admin" if needs_admin else "created"
         cur = self._conn.execute(
             """INSERT INTO jobs
                (contact_jid, contact_name, job_type, description, context_json,
                 status, escalation_code, created_at, updated_at, expires_at)
-               VALUES (?, ?, ?, ?, ?, 'created', ?, ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 contact_jid,
                 contact_name,
                 job_type,
                 description[:500],
-                json.dumps(context or {}),
+                json.dumps(ctx),
+                status,
                 escalation_code,
                 now,
                 now,
@@ -100,7 +111,7 @@ class JobQueue:
         sets = ["status = ?", "updated_at = ?"]
         vals: list[Any] = [status, time.time()]
 
-        for field in ("admin_response", "composed_reply", "escalation_code"):
+        for field in ("admin_response", "composed_reply", "escalation_code", "context_json"):
             if field in kwargs:
                 sets.append(f"{field} = ?")
                 vals.append(kwargs[field])
@@ -134,6 +145,20 @@ class JobQueue:
         rows = self._conn.execute(
             """SELECT * FROM jobs
                WHERE status IN ('created', 'waiting_admin', 'processing')
+               ORDER BY created_at ASC LIMIT ?""",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_actionable(self, limit: int = 5) -> list[dict]:
+        """Get 'created' jobs that don't need admin input (self-completable).
+
+        These are jobs the consumer loop can pick up and process via LLM
+        re-invocation without waiting for admin.
+        """
+        rows = self._conn.execute(
+            """SELECT * FROM jobs WHERE status = 'created'
+               AND json_extract(context_json, '$.needs_admin') IS NOT 1
                ORDER BY created_at ASC LIMIT ?""",
             (limit,),
         ).fetchall()

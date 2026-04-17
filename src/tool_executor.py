@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from src.config_manager import get_escalation_target
+
 try:
     import httpx
 except ImportError:
@@ -224,10 +226,12 @@ class ToolExecutor:
         self._client = client
         self._channel = channel  # WhatsAppChannel for send_message tool
         self._escalation = escalation  # EscalationEngine for ask_owner tool
+        self._sender_id: str = ""  # Set per-request in execute()
         self.MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 
         # Build unified handler map: core + integration tools
         self._integrations: dict = {}
+        self._extra_tool_defs: list[dict] = []  # Additional tool defs (e.g. booking)
         self._handlers: dict[str, Any] = {
             "generate_image": self._generate_image,
             "generate_video": self._generate_video,
@@ -264,19 +268,31 @@ class ToolExecutor:
         sender_id: str = "",
         is_admin: bool = False,
         is_elevated: bool = False,
+        context_hint: str = "normal",
     ) -> list[dict]:
-        """Get tool definitions filtered by sender visibility.
+        """Get tool definitions filtered by sender visibility and context.
 
         Programmatic guard: the LLM NEVER sees tools it shouldn't use.
         - visibility="all": everyone sees these tools
         - visibility="admin": only admin sees these tools
         - visibility="elevated": only admin in elevated mode sees these tools
 
+        Context-based filtering reduces token cost at scale:
+        - context_hint="greeting": pure greeting from non-admin -> 0 tools
+        - context_hint="normal": standard contact message -> core tools only
+        - context_hint="admin": admin message -> core + admin tools
+        - context_hint="elevated": admin in /break-chains -> all tools
+
         Args:
             sender_id: JID of the message sender.
             is_admin: Whether the sender is the admin.
             is_elevated: Whether admin has activated /break-chains mode.
+            context_hint: Message context for tool filtering.
         """
+        # Greeting fast-path: no tools needed for "hi"/"hello" from contacts
+        if context_hint == "greeting":
+            return []
+
         all_defs = list(TOOL_DEFINITIONS)
         for integ in self._integrations.values():
             vis = integ.visibility() if hasattr(integ, "visibility") else "all"
@@ -285,18 +301,23 @@ class ToolExecutor:
             if vis == "elevated" and not is_elevated:
                 continue
             all_defs.extend(integ.tool_definitions())
+        # Extra tool definitions registered by modules (e.g. booking)
+        all_defs.extend(self._extra_tool_defs)
         return all_defs
 
-    async def execute(self, tool_name: str, arguments: dict[str, Any], *, sender_id: str = "") -> ToolResult:
+    async def execute(self, tool_name: str, arguments: dict[str, Any], *, sender_id: str = "", chat_id: str = "") -> ToolResult:
         """Execute a tool by name and return the result.
 
         Args:
             tool_name: The tool to execute.
             arguments: Tool arguments from the LLM.
             sender_id: JID of the message sender (for per-request context like privacy).
+            chat_id: Chat JID (may be LID) for elevated mode checks.
 
         Never raises -- all exceptions are caught and returned as ToolResult with success=False.
         """
+        self._sender_id = sender_id  # Make available to core handlers like _ask_owner
+
         handler = self._handlers.get(tool_name)
         if not handler:
             return ToolResult(
@@ -309,7 +330,7 @@ class ToolExecutor:
         try:
             if tool_name in self._integration_tools:
                 # Integration handler: set per-request context, then execute
-                handler.set_request_context(sender_jid=sender_id)
+                handler.set_request_context(sender_jid=sender_id, chat_id=chat_id)
                 return await handler.execute(tool_name, arguments)
             else:
                 # Core handler: handler is a bound method
@@ -714,13 +735,13 @@ class ToolExecutor:
         contact_name = args.get("contact_name", "unknown contact")
         urgency = args.get("urgency", "normal")
 
-        admin_number = self.config.get("admin_number", "")
+        admin_number = get_escalation_target(self.config)
         if not admin_number:
             return ToolResult(False, "ask_owner", "No admin number configured")
 
         # Create escalation record
         code, admin_msg = self._escalation.escalate(
-            sender_id=contact_name,
+            sender_id=self._sender_id or contact_name,
             sender_name=contact_name,
             question=question,
             context=f"urgency: {urgency}",

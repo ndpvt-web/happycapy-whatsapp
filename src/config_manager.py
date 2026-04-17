@@ -20,25 +20,29 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "tone_custom_instructions": "",
     "mode": "auto_reply",
     "admin_number": "",
+    # Multi-admin support: list of phone numbers (digits only) with admin privileges
+    "admin_numbers": [],
+    # Escalation notifications always go to this number (digits only)
+    "escalation_notify_number": "",
     "allowlist": [],
     "blocklist": [],
     "voice_transcription": False,
     "voice_transcription_provider": "groq",
     "media_handling": "acknowledge",
     "group_policy": "monitor",
-    "bridge_port": 3002,
+    "bridge_port": 3004,
     "qr_server_port": 8765,
     "auth_dir": str(Path.home() / ".happycapy-whatsapp" / "whatsapp-auth"),
     "log_level": "INFO",
     "system_prompt_override": "",
     "bridge_token": "",
-    "ai_gateway_url": "https://ai-gateway.happycapy.ai/api/v1/openai/v1",
-    "ai_model": "gpt-4.1-mini",
+    "ai_gateway_url": "https://ai-gateway.happycapy.ai/api/v1",
+    "ai_model": "anthropic/claude-haiku-4.5",
     "max_message_length": 4000,
     "rate_limit_per_minute": 30,
     "media_max_age_hours": 24,
     "whisper_api_url": "https://api.groq.com/openai/v1/audio/transcriptions",
-    "profile_model": "gpt-4.1-mini",
+    "profile_model": "anthropic/claude-haiku-4.5",
     # Intelligence layer fields (nanobot-inspired)
     "status_override": "",           # available/busy/dnd/away (empty = auto)
     "auto_reply_when_busy": True,    # Use templates when busy/dnd/away
@@ -65,6 +69,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "enabled_integrations": ["core"],
     # Business template: pre-built personality pack (empty = no template)
     "business_template": "",
+    # Web search: modular provider (worker_api/ai_gateway/tavily/brave)
+    "web_search_enabled": True,
+    "web_search_provider": "worker_api",
+    "web_search_api_key": "",
+    # Meeting prep: auto-research attendees before meetings
+    "meeting_prep_minutes_before": 30,
+    # Contact research: max web results per lookup
+    "contact_research_max_results": 5,
+    # Mac Bridge: remote Mac control via WhatsApp
+    "mac_bridge_enabled": False,
+    "mac_bridge_authorized_jid": "919996126890",
 }
 
 # Environment variable overrides (Theorem T4)
@@ -191,6 +206,36 @@ def validate_config(config: dict[str, Any]) -> list[str]:
         issues.append("enabled_integrations must be a list")
 
     return issues
+
+
+def is_admin(config: dict[str, Any], sender_id: str) -> bool:
+    """Check if a sender is an admin. Supports both legacy admin_number and admin_numbers list."""
+    if not sender_id:
+        return False
+    # Check admin_numbers list first
+    admin_list = config.get("admin_numbers", [])
+    if isinstance(admin_list, list) and sender_id in admin_list:
+        return True
+    # Fall back to legacy admin_number
+    legacy = config.get("admin_number", "")
+    return bool(legacy and sender_id == legacy)
+
+
+def get_escalation_target(config: dict[str, Any]) -> str:
+    """Get the phone number for escalation notifications.
+
+    Priority: escalation_notify_number > admin_number > first admin_numbers entry.
+    """
+    esc = config.get("escalation_notify_number", "")
+    if esc:
+        return esc
+    legacy = config.get("admin_number", "")
+    if legacy:
+        return legacy
+    admin_list = config.get("admin_numbers", [])
+    if isinstance(admin_list, list) and admin_list:
+        return admin_list[0]
+    return ""
 
 
 def build_system_prompt(config: dict[str, Any]) -> str:

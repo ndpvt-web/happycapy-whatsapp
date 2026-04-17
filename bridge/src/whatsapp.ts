@@ -176,7 +176,7 @@ export class WhatsAppClient {
             id: msg.key?.id || '',
             chatJid,
             content,
-            timestamp: (msg.messageTimestamp as number) || 0,
+            timestamp: Number(msg.messageTimestamp) || 0,
             fromMe: msg.key?.fromMe || false,
             isGroup: chatJid.endsWith('@g.us'),
             participant: msg.key?.participant || '',

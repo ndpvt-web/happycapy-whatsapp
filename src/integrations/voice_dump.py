@@ -13,6 +13,8 @@ import os
 from datetime import datetime
 from typing import Any
 
+from src.config_manager import is_admin
+
 from .base import BaseIntegration, IntegrationInfo
 from src.tool_executor import ToolResult
 
@@ -184,8 +186,7 @@ class Integration(BaseIntegration):
         self._sender_jid = sender_jid
 
     def _is_admin(self) -> bool:
-        admin = self.config.get("admin_number", "")
-        return admin and admin in self._sender_jid
+        return is_admin(self.config, self._sender_jid)
 
     @classmethod
     def info(cls) -> IntegrationInfo:

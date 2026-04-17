@@ -73,6 +73,12 @@ from src.intent_classifier import IntentClassifier, EscalationLevel
 from src.message_aggregator import MessageAggregator
 from src.admin_mode import AdminModeManager
 from src.job_queue import JobQueue
+from src.job_consumer import JobConsumer
+from src.booking.engine import BookingEngine
+from src.booking.context import ContextAggregator
+from src.booking.intents import BookingIntentFulfiller
+from src.booking.proactive import BookingProactiveEngine
+from src.booking.tools import BookingTools, BOOKING_TOOL_DEFINITIONS
 
 try:
     import httpx
@@ -80,6 +86,7 @@ except ImportError:
     httpx = None
 
 
+import re
 from dataclasses import dataclass
 
 
@@ -90,6 +97,22 @@ class AIResponse:
     content: str | None  # Text response (None if only tool calls)
     tool_calls: list[dict] | None  # OpenAI-format tool calls
     finish_reason: str  # "stop" or "tool_calls"
+
+
+# ─── Greeting Detection ───
+
+_GREETING_RE = re.compile(
+    r"^[\s\U0001F44B\U0001F91A\u270B]*"  # optional whitespace + wave emojis
+    r"(h[ie](y+|llo)?|yo+|sup|what'?s\s*up|good\s*(morning|afternoon|evening|night)"
+    r"|how\s*are\s*you|howdy|hola|namaste|salaam|hey\s*there)"
+    r"[\s!.\U0001F44B\U0001F91A\u270B]*$",
+    re.IGNORECASE,
+)
+
+
+def _is_pure_greeting(text: str) -> bool:
+    """Return True if the message is a pure social greeting with no substantive content."""
+    return bool(_GREETING_RE.match(text.strip()))
 
 
 # ─── Setup Wizard Questions (mapped to AskUserQuestion format) ───
@@ -652,6 +675,12 @@ class WhatsAppOrchestrator:
         self.admin_mode: AdminModeManager = AdminModeManager()
         # Proactive job queue (deferred follow-up tasks)
         self.job_queue: JobQueue | None = None
+        # Background job consumer (processes deferred jobs every 30s)
+        self.job_consumer: JobConsumer | None = None
+        # Booking engine (state machine + context + proactive)
+        self.booking_engine: BookingEngine | None = None
+        self.booking_proactive: BookingProactiveEngine | None = None
+        self.booking_fulfiller: BookingIntentFulfiller | None = None
 
     def print_setup_instructions(self) -> None:
         """Print the setup wizard questions for the user to answer via AskUserQuestion."""
@@ -1048,6 +1077,60 @@ class WhatsAppOrchestrator:
             if metadata.get("quoted_participant"):
                 print(f"  [reply-chain] Quote from {metadata['quoted_participant'][:12]}.. ({len(quoted_content)} chars)")
 
+        # ── Booking: admin approval routing ──
+        # When admin replies to a booking notification, route to engine (yes/no).
+        if sender_is_admin and self.booking_fulfiller:
+            try:
+                _bkg_handled = await self.booking_fulfiller.route_admin_reply(content, sender_id)
+                if _bkg_handled:
+                    cleanup_temp_files(*temp_files_to_cleanup)
+                    return
+            except Exception as _e:
+                print(f"[booking] Admin reply routing error: {_e}")
+
+        # ── Booking: contact slot-choice routing ──
+        # When a contact replies with a slot number, advance booking state automatically.
+        if not sender_is_admin and self.booking_fulfiller:
+            try:
+                _bkg_contact_handled = await self.booking_fulfiller.route_contact_reply(
+                    sender_id, content
+                )
+                if _bkg_contact_handled:
+                    # Contact picked a slot — LLM should now call notify_owner_meeting_request
+                    # so let it continue to AI processing with an enriched hint
+                    print(f"[booking] Contact slot choice routed for {sender_id}")
+            except Exception as _e:
+                print(f"[booking] Contact reply routing error: {_e}")
+
+        # ── Option 1: Quoted reply escalation routing (zero-friction) ──
+        # When admin long-presses an escalation notification and replies to it,
+        # auto-route the reply to the original contact — no /respond code needed.
+        if sender_is_admin and quoted_content and self.escalation:
+            import re as _re
+            _esc_match = _re.search(r'\[ESC-(\d+)\]', quoted_content)
+            if _esc_match:
+                _esc_code = f"ESC-{_esc_match.group(1)}"
+                _result = self.escalation.respond(_esc_code, content)
+                if _result:
+                    _contact_jid = f"{_result['sender_id']}@s.whatsapp.net"
+                    _name = _result.get("sender_name", _result["sender_id"])
+                    try:
+                        await self.channel.send_text(_contact_jid, content)
+                        await self.channel.send_text(chat_id, f"[{_esc_code}] Sent to {_name} ✓")
+                        print(f"[escalation] Quoted reply routed: {_esc_code} -> {_name}")
+                        if self.reflection:
+                            _esc_record = self.escalation.get(_esc_code)
+                            if _esc_record:
+                                self.reflection.record_escalation_answer(
+                                    question=_esc_record.get("question_preview", ""),
+                                    answer=content,
+                                    contact_id=_result["sender_id"],
+                                )
+                    except Exception as _e:
+                        await self.channel.send_text(chat_id, f"[{_esc_code}] Failed: {_e}")
+                    cleanup_temp_files(*temp_files_to_cleanup)
+                    return
+
         # Theorem T_FIRE: Fire-and-forget sample storage to avoid blocking the AI call.
         # The asyncio lock inside store_sample handles concurrent writes safely.
         if self.contact_store:
@@ -1110,6 +1193,20 @@ class WhatsAppOrchestrator:
             except Exception:
                 pass  # KG failure should not block the response
 
+        _is_elev = self.admin_mode.is_elevated(chat_id) if self.admin_mode else False
+
+        # Detect voice messages and compute context hint for tool filtering
+        _has_voice = any(
+            Path(fp).suffix.lower() in (".ogg", ".mp3", ".m4a", ".wav")
+            for fp in media_paths
+        )
+        if sender_is_admin:
+            _context_hint = "elevated" if _is_elev else "admin"
+        elif not content.strip() or _is_pure_greeting(content):
+            _context_hint = "greeting"
+        else:
+            _context_hint = "normal"
+
         if self.context_builder:
             system_prompt = self.context_builder.build_system_prompt(
                 self.config,
@@ -1118,7 +1215,9 @@ class WhatsAppOrchestrator:
                 contact_profile=profile_context,
                 rag_context=rag_context,
                 is_admin=sender_is_admin,
-                is_elevated=self.admin_mode.is_elevated(chat_id),
+                is_elevated=_is_elev,
+                has_voice=_has_voice,
+                runtime_integrations=self.tool_executor._integrations if self.tool_executor else None,
             )
         else:
             # Fallback to legacy prompt
@@ -1133,21 +1232,6 @@ class WhatsAppOrchestrator:
             lessons_ctx = self.reflection.get_lessons_for_prompt(contact_id=sender_id)
             if lessons_ctx:
                 system_prompt = system_prompt + "\n\n---\n\n" + lessons_ctx
-
-        # Inject elevated mode context when admin is in /break-chains mode
-        if sender_is_admin and self.admin_mode.is_elevated(chat_id):
-            elevated_ctx = (
-                "## ELEVATED MODE ACTIVE\n"
-                "You are in elevated admin mode (/break-chains). You have access to:\n"
-                "- `access_contact_memory` tool: look up any contact's memory by name/number\n"
-                "- `search_across_contacts` tool: search keywords across all contacts\n"
-                "- `create_followup_job` tool: queue a follow-up task for any contact\n"
-                "- `list_pending_jobs` tool: see all pending follow-up tasks\n\n"
-                "When admin asks about a contact, USE the access_contact_memory tool.\n"
-                "When admin asks to follow up with someone, USE create_followup_job.\n"
-                "This mode auto-expires after 30 minutes of inactivity."
-            )
-            system_prompt = system_prompt + "\n\n---\n\n" + elevated_ctx
 
         # Proactive plan context injection: tells AI what the student's plan status is
         if self.proactive:
@@ -1183,7 +1267,8 @@ class WhatsAppOrchestrator:
             tools=self.tool_executor.get_tool_definitions(
                 sender_id=sender_id,
                 is_admin=sender_is_admin,
-                is_elevated=self.admin_mode.is_elevated(chat_id),
+                is_elevated=_is_elev,
+                context_hint=_context_hint,
             ) if use_tools else None,
         )
 
@@ -1202,6 +1287,7 @@ class WhatsAppOrchestrator:
             sender_id=sender_id,
             is_admin=sender_is_admin,
             is_elevated=self.admin_mode.is_elevated(chat_id),
+            context_hint=_context_hint,
         ) if self.tool_executor else None
 
         for tool_round in range(MAX_TOOL_ROUNDS):
@@ -1215,6 +1301,7 @@ class WhatsAppOrchestrator:
                     sender_id=sender_id,
                     is_admin=sender_is_admin,
                     is_elevated=self.admin_mode.is_elevated(chat_id),
+                    context_hint=_context_hint,
                 )
                 if "function" in td and "name" in td["function"]
             }
@@ -1279,7 +1366,7 @@ class WhatsAppOrchestrator:
                     func_args["jid"] = sender_id
 
                 print(f"  [tools] Executing {func_name}...")
-                result = await self.tool_executor.execute(func_name, func_args, sender_id=sender_id)
+                result = await self.tool_executor.execute(func_name, func_args, sender_id=sender_id, chat_id=chat_id)
 
                 if result.success and result.media_path:
                     generated_media.append(result.media_path)
@@ -1428,17 +1515,6 @@ class WhatsAppOrchestrator:
         if not recent:
             return ""
 
-        # Also check pending escalations from the EscalationEngine (ask_owner)
-        pending_esc = ""
-        if self.escalation:
-            pending = self.escalation.pending()
-            if pending:
-                esc_lines = []
-                for esc in pending[:5]:
-                    name = esc.get("sender_name") or esc["sender_id"]
-                    esc_lines.append(f"  [{esc['code']}] From {name}: {esc.get('question_preview', '?')}")
-                pending_esc = "\nPending ask_owner escalations:\n" + "\n".join(esc_lines)
-
         # Build context block
         lines = [
             "## Escalation Context (YOU ARE THE ADMIN / PHONE OWNER)",
@@ -1452,17 +1528,28 @@ class WhatsAppOrchestrator:
             score = alert.get("score", "?")
             lines.append(f"{i+1}. [{score}/10] *{name}*: {preview}")
 
-        if pending_esc:
-            lines.append(pending_esc)
+        # Pending ask_owner escalations with phone numbers for direct routing
+        if self.escalation:
+            pending = self.escalation.pending()
+            if pending:
+                lines.append("\nPending escalations (use send_message to answer):")
+                for esc in pending[:5]:
+                    name = esc.get("sender_name") or esc["sender_id"]
+                    phone = esc["sender_id"]  # raw phone number, no @suffix
+                    lines.append(
+                        f"  [{esc['code']}] {name} (phone: {phone}): {esc.get('question_preview', '?')}"
+                    )
 
         lines.extend([
             "",
             "INSTRUCTIONS FOR ADMIN REPLY:",
             "- The admin is telling you what to reply to a specific contact.",
-            "- Determine which contact/escalation the admin is responding to.",
-            "- Use the send_message tool to forward the admin's reply to the correct contact.",
-            "- If you can't determine which contact, ask the admin to clarify.",
-            "- The reply should go TO the contact, not back to the admin.",
+            "- Determine which contact the admin is responding to (use name + question as context).",
+            "- Call send_message with the contact's phone number to forward the reply directly.",
+            "- Do NOT repeat the answer back to the admin — just confirm you sent it.",
+            "- If multiple pending and unclear which one, ask the admin to clarify.",
+            "- The reply goes TO the contact, not back to the admin.",
+            "- IMPORTANT: Use the exact phone number shown above in send_message.",
         ])
 
         return "\n".join(lines)
@@ -1701,6 +1788,7 @@ class WhatsAppOrchestrator:
                 "/break-chains - Activate elevated mode (cross-contact access)\n"
                 "/secure-it - Deactivate elevated mode\n"
                 "/jobs - List pending follow-up jobs\n"
+                "/jobs process - Manually trigger job consumer tick\n"
                 "/help - This message"
             )
             await self.channel.send_text(chat_id, help_text)
@@ -1714,7 +1802,17 @@ class WhatsAppOrchestrator:
             await self.channel.send_text(chat_id, msg)
 
         elif cmd == "/jobs":
-            if self.job_queue:
+            if args == "process":
+                if self.job_consumer:
+                    await self.channel.send_text(chat_id, "Triggering job consumer tick...")
+                    try:
+                        await self.job_consumer._tick()
+                        await self.channel.send_text(chat_id, "Job consumer tick complete.")
+                    except Exception as e:
+                        await self.channel.send_text(chat_id, f"Job consumer error: {e}")
+                else:
+                    await self.channel.send_text(chat_id, "Job consumer not initialized.")
+            elif self.job_queue:
                 jobs = self.job_queue.get_pending(limit=20)
                 await self.channel.send_text(chat_id, self.job_queue.format_job_list(jobs))
             else:
@@ -3300,6 +3398,21 @@ class WhatsAppOrchestrator:
         except Exception as e:
             print(f"Job queue init error: {e}")
 
+        # Job Tools (globally visible create_followup_job for ALL contacts)
+        if self.job_queue:
+            try:
+                from src.integrations.job_tools import Integration as JobToolsInteg
+                _register_integration(
+                    JobToolsInteg(
+                        config=self.config,
+                        job_queue=self.job_queue,
+                        contact_store=self.contact_store,
+                    ),
+                    "Job Tools",
+                )
+            except Exception as e:
+                print(f"[integrations] Job Tools skipped: {e}")
+
         # Admin Tools (cross-contact access, job management -- elevated mode only)
         try:
             from src.integrations.admin_tools import Integration as AdminToolsInteg
@@ -3317,11 +3430,81 @@ class WhatsAppOrchestrator:
         except Exception as e:
             print(f"[integrations] Admin Tools skipped: {e}")
 
+        # Booking engine (state machine + context + proactive + intent fulfillment)
+        try:
+            booking_db = get_config_dir() / "bookings.db"
+            self.booking_engine = BookingEngine(booking_db)
+
+            booking_ctx = ContextAggregator(
+                config=self.config,
+                memory_store=self.memory,
+                http_client=self._http_client,
+            )
+
+            # Intent fulfiller: WhatsApp transport layer for booking intents
+            self.booking_fulfiller = BookingIntentFulfiller(
+                engine=self.booking_engine,
+                config=self.config,
+                channel=None,  # Set after channel is created
+            )
+            self.booking_engine.on_intent(self.booking_fulfiller.on_intent)
+
+            # Proactive engine: TTL expiry + T-60min brief (LLM-independent)
+            self.booking_proactive = BookingProactiveEngine(
+                engine=self.booking_engine,
+                context_aggregator=booking_ctx,
+                config=self.config,
+                channel=None,   # Set after channel is created
+                http_client=self._http_client,
+            )
+            self.booking_engine.on_state_change(self.booking_proactive.on_state_change)
+
+            # Register booking tools with tool executor
+            if self.tool_executor:
+                booking_tools = BookingTools(
+                    engine=self.booking_engine,
+                    context_aggregator=booking_ctx,
+                    channel=None,  # Set after channel is created
+                )
+                for td in BOOKING_TOOL_DEFINITIONS:
+                    tname = td["function"]["name"]
+                    self.tool_executor._handlers[tname] = booking_tools
+                    self.tool_executor._integration_tools.add(tname)
+                # Register tool defs so get_tool_definitions() returns them
+                self.tool_executor._extra_tool_defs.extend(BOOKING_TOOL_DEFINITIONS)
+                # Store for channel injection later
+                self._booking_tools_instance = booking_tools
+            else:
+                self._booking_tools_instance = None
+
+            print("Booking engine initialized (state machine + context + proactive)")
+        except Exception as e:
+            print(f"Booking engine init error: {type(e).__name__}: {e}")
+            self._booking_tools_instance = None
+
         # Proactive engine DISABLED -- bot is a general WhatsApp assistant, not a study companion.
         # The proactive engine (proactive_engine.py) is a Babloo-specific study companion
         # with student tracking, mastery, spaced repetition, etc. Not needed for general use.
         self.proactive = None
         print("Proactive engine: disabled (general assistant mode)")
+
+        # Job Consumer (background loop that processes deferred jobs every 30s)
+        if self.job_queue:
+            try:
+                self.job_consumer = JobConsumer(
+                    job_queue=self.job_queue,
+                    channel=None,  # Set after channel creation
+                    config=self.config,
+                    tool_executor=self.tool_executor,
+                    contact_store=self.contact_store,
+                    memory=self.memory,
+                    kg=self.kg,
+                    http_client=self._http_client,
+                    context_builder=self.context_builder,
+                )
+                print("Job consumer initialized")
+            except Exception as e:
+                print(f"Job consumer init error: {e}")
 
         # Mark bridge running in health monitor
         if self.health_monitor:
@@ -3369,6 +3552,18 @@ class WhatsAppOrchestrator:
         # Share channel with proactive engine
         if self.proactive:
             self.proactive.channel = self.channel
+        # Share channel with job consumer
+        if self.job_consumer:
+            self.job_consumer.channel = self.channel
+        # Share channel with booking components + start proactive engine
+        if self.booking_fulfiller:
+            self.booking_fulfiller._channel = self.channel
+        if self.booking_proactive:
+            self.booking_proactive._channel = self.channel
+            self.booking_proactive.start()
+            print("[booking] Proactive engine started")
+        if self._booking_tools_instance:
+            self._booking_tools_instance._channel = self.channel
 
         # Start heartbeat service (periodic maintenance)
         if self.heartbeat:
@@ -3377,6 +3572,10 @@ class WhatsAppOrchestrator:
         # Start cron/scheduling service
         if self.cron:
             await self.cron.start()
+
+        # Start job consumer (background deferred job processing)
+        if self.job_consumer:
+            self.job_consumer.start()
 
         # Start email monitor (proactive inbox polling)
         if self._email_monitor:
@@ -3438,6 +3637,9 @@ class WhatsAppOrchestrator:
 
         if self.heartbeat:
             await self.heartbeat.stop()
+
+        if self.job_consumer:
+            self.job_consumer.stop()
 
         if self.cron:
             await self.cron.stop()

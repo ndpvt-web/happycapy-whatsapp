@@ -991,6 +991,98 @@ def get_group_detail(jid: str):
     return result
 
 
+@app.get("/api/groups/{jid}/analysis")
+def get_group_analysis(jid: str):
+    """Return group dynamics analysis, member profiles, and message stats."""
+    if not CONTACTS_DB.exists():
+        raise HTTPException(404, "contacts.db not found")
+
+    # 1) Resolve group name from group_cards
+    with _db(CONTACTS_DB) as conn:
+        row = conn.execute(
+            "SELECT group_name FROM group_cards WHERE group_jid = ?", (jid,)
+        ).fetchone()
+        group_name = row["group_name"] if row else jid
+
+        # 2) Per-member message stats from group_samples
+        name_map = _get_jid_names(conn)
+        member_rows = conn.execute("""
+            SELECT sender_id, COUNT(*) as msgs,
+                   MIN(timestamp) as first_msg, MAX(timestamp) as last_msg
+            FROM group_samples WHERE group_jid = ?
+            GROUP BY sender_id ORDER BY msgs DESC
+        """, (jid,)).fetchall()
+        members_stats = []
+        for mr in member_rows:
+            sid = mr["sender_id"]
+            members_stats.append({
+                "sender_id": sid,
+                "name": name_map.get(sid, sid),
+                "msgs": mr["msgs"],
+                "first_msg": mr["first_msg"],
+                "last_msg": mr["last_msg"],
+            })
+
+        total_msgs = sum(m["msgs"] for m in members_stats)
+        date_range = ""
+        if member_rows:
+            all_first = [mr["first_msg"] for mr in member_rows if mr["first_msg"]]
+            all_last = [mr["last_msg"] for mr in member_rows if mr["last_msg"]]
+            if all_first and all_last:
+                date_range = f"{min(all_first)[:10]} to {max(all_last)[:10]}"
+
+    # 3) Read dynamics markdown
+    # Strip emojis/non-ASCII chars and normalize spaces for filename matching
+    import re as _re
+    safe_name = _re.sub(r'[^\x00-\x7F]+', '', group_name).strip().replace(" ", "_")
+    groups_dir = MEMORY_DIR / "groups"
+    dynamics_content = ""
+    dynamics_path = groups_dir / f"{safe_name}_dynamics.md"
+    if dynamics_path.exists():
+        dynamics_content = dynamics_path.read_text(errors="replace")
+
+    # 4) Read members markdown and parse into per-member profiles
+    members_content = ""
+    member_profiles = []
+    members_path = groups_dir / f"{safe_name}_members.md"
+    if members_path.exists():
+        members_content = members_path.read_text(errors="replace")
+        # Parse "## Name (N messages)" sections
+        import re
+        sections = re.split(r'^## ', members_content, flags=re.MULTILINE)
+        for sec in sections[1:]:  # skip header before first ##
+            lines = sec.strip().split('\n', 1)
+            header = lines[0].strip()
+            body = lines[1].strip() if len(lines) > 1 else ""
+            # Remove trailing --- separator
+            body = body.rstrip('-').rstrip()
+            m = re.match(r'^(.+?)\s*\((\d+)\s*messages?\)', header)
+            if m:
+                member_profiles.append({
+                    "name": m.group(1).strip(),
+                    "msg_count": int(m.group(2)),
+                    "profile": body,
+                })
+            elif header:
+                member_profiles.append({
+                    "name": header,
+                    "msg_count": 0,
+                    "profile": body,
+                })
+
+    return {
+        "group_name": group_name,
+        "group_jid": jid,
+        "total_messages": total_msgs,
+        "unique_senders": len(members_stats),
+        "date_range": date_range,
+        "dynamics": dynamics_content,
+        "has_dynamics": bool(dynamics_content),
+        "member_profiles": member_profiles,
+        "member_stats": members_stats,
+    }
+
+
 # ══════════════════════════════════════════════════════════════
 # Proactive System Endpoints
 # ══════════════════════════════════════════════════════════════
@@ -1436,6 +1528,20 @@ def serve_proactive_spa(path: str):
     if index.exists():
         return HTMLResponse(index.read_text())
     raise HTTPException(404)
+
+
+# ══════════════════════════════════════════════════════════════
+# Apps / Integrations
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/api/apps")
+def get_apps():
+    """Return the list of enabled integrations from config."""
+    try:
+        cfg = json.loads(CONFIG_FILE.read_text()) if CONFIG_FILE.exists() else {}
+    except Exception:
+        cfg = {}
+    return {"enabled_integrations": cfg.get("enabled_integrations", [])}
 
 
 # ══════════════════════════════════════════════════════════════

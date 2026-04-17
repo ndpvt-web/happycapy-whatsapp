@@ -351,7 +351,7 @@ Return ONLY valid JSON, no markdown or explanation."""
 
         gateway_url = config.get("ai_gateway_url", "https://ai-gateway.happycapy.ai/api/v1")
         # Theorem T_PMODEL: Use Haiku for profile gen (faster, non-user-facing).
-        model = config.get("profile_model", "claude-haiku-4-5-20251001")
+        model = config.get("profile_model", "anthropic/claude-haiku-4.5")
 
         url = f"{gateway_url}/chat/completions"
         headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -645,7 +645,7 @@ Return ONLY valid JSON, no markdown or explanation."""
 
     # Rate limits to prevent group message floods from consuming storage/CPU.
     # 500 samples per group = ~100KB max. 60s cooldown = max 1 sample/min/group.
-    _GROUP_MAX_SAMPLES = 500
+    _GROUP_MAX_SAMPLES = 10000
     _GROUP_SAMPLE_COOLDOWN = 60  # seconds between stored samples per group
 
     def _init_group_tables(self) -> None:
@@ -695,22 +695,25 @@ Return ONLY valid JSON, no markdown or explanation."""
     async def store_group_sample(
         self, group_jid: str, sender_id: str, content: str,
         group_name: str = "", timestamp: str = "",
+        skip_cooldown: bool = False,
     ) -> bool:
         """Store a sampled group message (rate-limited, capped).
 
         Returns True if stored, False if rate-limited or skipped.
         Designed to handle hundreds of messages/sec without slowing down.
+        Set skip_cooldown=True for bulk imports (e.g. history sync).
         """
         if not content or len(content.strip()) < 3:
             return False
 
         # Rate limit: check last sample time for this group
-        now = time.time()
-        cache_key = f"_grp_{group_jid}"
-        last_ts = getattr(self, cache_key, 0)
-        if now - last_ts < self._GROUP_SAMPLE_COOLDOWN:
-            return False
-        setattr(self, cache_key, now)
+        if not skip_cooldown:
+            now = time.time()
+            cache_key = f"_grp_{group_jid}"
+            last_ts = getattr(self, cache_key, 0)
+            if now - last_ts < self._GROUP_SAMPLE_COOLDOWN:
+                return False
+            setattr(self, cache_key, now)
 
         ts = timestamp or datetime.now().isoformat()
         async with self._write_lock:
@@ -731,10 +734,10 @@ Return ONLY valid JSON, no markdown or explanation."""
                     (group_jid, delete_count),
                 )
 
-            # Store with truncated content (200 chars vs 2000 for DMs)
+            # Store with truncated content (2000 chars, same as DMs)
             self._conn.execute(
                 "INSERT INTO group_samples (group_jid, sender_id, content, timestamp) VALUES (?, ?, ?, ?)",
-                (group_jid, sender_id, content[:200], ts),
+                (group_jid, sender_id, content[:2000], ts),
             )
 
             # Upsert group card (touch last_active + name)
