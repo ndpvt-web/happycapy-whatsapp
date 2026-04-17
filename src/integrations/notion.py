@@ -607,9 +607,25 @@ class Integration(BaseIntegration):
         sender_id = self._sender_jid.split("@")[0] if self._sender_jid else ""
         return is_admin(self.config, sender_id)
 
+    def _get_token(self) -> str:
+        """Return active Notion token: env var first, then OAuth store fallback."""
+        if self._token:
+            return self._token
+        try:
+            from pathlib import Path
+            from .oauth.token_store import OAuthTokenStore
+            db_path = Path.home() / ".happycapy-whatsapp" / "oauth_tokens.db"
+            if db_path.exists():
+                bundle = OAuthTokenStore(db_path).get("notion")
+                if bundle and bundle.access_token:
+                    return bundle.access_token
+        except Exception:
+            pass
+        return ""
+
     def _headers(self) -> dict[str, str]:
         return {
-            "Authorization": f"Bearer {self._token}",
+            "Authorization": f"Bearer {self._get_token()}",
             "Notion-Version": NOTION_VERSION,
             "Content-Type": "application/json",
         }
@@ -646,8 +662,8 @@ class Integration(BaseIntegration):
     async def execute(self, tool_name: str, arguments: dict[str, Any]) -> Any:
         if not self._is_admin():
             return ToolResult(False, tool_name, "Notion tools are admin-only.")
-        if not self._token:
-            return ToolResult(False, tool_name, "NOTION_API_TOKEN not set.")
+        if not self._get_token():
+            return ToolResult(False, tool_name, "Notion not connected. Set NOTION_API_TOKEN or connect via the dashboard Apps section.")
         handlers = {
             "notion_search": self._search,
             "notion_read_page": self._read_page,

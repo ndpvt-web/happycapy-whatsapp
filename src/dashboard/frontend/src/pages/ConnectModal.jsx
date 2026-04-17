@@ -43,7 +43,11 @@ export default function ConnectModal({ app, isConnected, onClose, onStatusChange
     setDisconnecting(true);
     setError('');
     try {
-      await api.deleteToken(app.id);
+      if (app.auth_type === 'oauth') {
+        await api.oauthDisconnect(app.id);
+      } else {
+        await api.deleteToken(app.id);
+      }
       setSuccess('Disconnected');
       onStatusChange?.(app.id, false);
       setTimeout(onClose, 600);

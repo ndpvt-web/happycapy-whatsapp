@@ -1557,6 +1557,223 @@ def serve_root():
     return JSONResponse({"error": "Frontend not built. Run: cd frontend && npm run build"}, 404)
 
 
+# ══════════════════════════════════════════════════════════════
+# OAUTH INTEGRATION HUB
+# ══════════════════════════════════════════════════════════════
+# 4 endpoints: start → callback → status → disconnect
+# Zero friction: user clicks Connect, approves, done forever.
+
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+from fastapi.responses import RedirectResponse as _RedirectResponse
+
+def _get_oauth_manager():
+    """Lazy-load credential manager (avoids startup failures if deps missing)."""
+    try:
+        from src.integrations.oauth import get_credential_manager
+        return get_credential_manager(BASE_DIR)
+    except Exception as e:
+        print(f"[oauth] Failed to load credential manager: {e}")
+        return None
+
+def _dashboard_url(request) -> str:
+    """Infer the dashboard base URL from the incoming request."""
+    return str(request.base_url).rstrip("/")
+
+
+@app.get("/api/oauth/start/{app_id}")
+async def oauth_start(app_id: str, request):
+    """Redirect user to OAuth consent screen for the given app.
+
+    Creates a state nonce (CSRF guard), builds the provider's authorization
+    URL, and 302-redirects the user's browser there.
+    """
+    manager = _get_oauth_manager()
+    if not manager:
+        raise HTTPException(500, "OAuth not configured")
+
+    try:
+        from src.integrations.oauth.providers import get_provider, get_provider_id
+        provider = get_provider(app_id)
+        if not provider:
+            raise HTTPException(400, f"Unknown app: {app_id}")
+
+        if not provider.is_configured:
+            raise HTTPException(400,
+                f"{provider.display_name} OAuth credentials not configured. "
+                f"Set {app_id.upper().replace('-','_')}_CLIENT_ID and "
+                f"{app_id.upper().replace('-','_')}_CLIENT_SECRET env vars."
+            )
+
+        provider_id = get_provider_id(app_id)
+        state = provider.generate_state()
+        redirect_uri = f"{_dashboard_url(request)}/api/oauth/callback/{app_id}"
+
+        # Store state nonce (10-min TTL, CSRF guard)
+        manager._store.store_state_nonce(state, provider_id, redirect_uri)
+
+        auth_url = provider.authorize_url(state, redirect_uri)
+        return _RedirectResponse(url=auth_url, status_code=302)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"OAuth start failed: {e}")
+
+
+@app.get("/api/oauth/callback/{app_id}")
+async def oauth_callback(app_id: str, request, code: str = None, state: str = None, error: str = None):
+    """Handle OAuth callback. Exchange code for tokens, store, redirect to dashboard.
+
+    This is where the provider redirects after user approval.
+    Success → /dashboard#/apps?connected={app_id}
+    Failure → /dashboard#/apps?auth_error={message}
+    """
+    dashboard_base = _dashboard_url(request)
+
+    if error:
+        return _RedirectResponse(
+            url=f"{dashboard_base}/#/apps?auth_error={error}",
+            status_code=302
+        )
+
+    if not code or not state:
+        return _RedirectResponse(
+            url=f"{dashboard_base}/#/apps?auth_error=missing_code_or_state",
+            status_code=302
+        )
+
+    manager = _get_oauth_manager()
+    if not manager:
+        return _RedirectResponse(
+            url=f"{dashboard_base}/#/apps?auth_error=oauth_not_configured",
+            status_code=302
+        )
+
+    # Validate state nonce (CSRF guard)
+    nonce_data = manager._store.consume_state_nonce(state)
+    if not nonce_data:
+        return _RedirectResponse(
+            url=f"{dashboard_base}/#/apps?auth_error=invalid_or_expired_state",
+            status_code=302
+        )
+
+    try:
+        from src.integrations.oauth.providers import get_provider
+        provider = get_provider(app_id)
+        if not provider:
+            return _RedirectResponse(
+                url=f"{dashboard_base}/#/apps?auth_error=unknown_provider",
+                status_code=302
+            )
+
+        redirect_uri = nonce_data["redirect_uri"]
+        bundle = await provider.exchange_code(code, redirect_uri)
+        manager._store.put(bundle)
+
+        print(f"[oauth] {provider.display_name} connected: {bundle.workspace_name}")
+        return _RedirectResponse(
+            url=f"{dashboard_base}/#/apps?connected={app_id}",
+            status_code=302
+        )
+
+    except Exception as e:
+        print(f"[oauth] Callback error for {app_id}: {e}")
+        return _RedirectResponse(
+            url=f"{dashboard_base}/#/apps?auth_error={str(e)[:100]}",
+            status_code=302
+        )
+
+
+@app.get("/api/oauth/status")
+def oauth_status():
+    """Return connection status for all OAuth providers.
+
+    Response: { "google": { "connected": true, "workspace_name": "..." }, ... }
+    """
+    manager = _get_oauth_manager()
+    if not manager:
+        return JSONResponse({})
+    try:
+        return JSONResponse(manager.all_status())
+    except Exception as e:
+        print(f"[oauth] Status error: {e}")
+        return JSONResponse({})
+
+
+@app.delete("/api/oauth/disconnect/{app_id}")
+async def oauth_disconnect(app_id: str):
+    """Disconnect an app — revoke token at provider and delete from store."""
+    manager = _get_oauth_manager()
+    if not manager:
+        raise HTTPException(500, "OAuth not configured")
+
+    try:
+        from src.integrations.oauth.providers import get_provider_id
+        provider_id = get_provider_id(app_id)
+        manager._store.delete(provider_id)
+        return JSONResponse({"success": True, "provider_id": provider_id})
+    except Exception as e:
+        raise HTTPException(500, f"Disconnect failed: {e}")
+
+
+# Also expose legacy /api/auth/status for backwards compatibility with existing dashboard
+@app.get("/api/auth/status")
+def auth_status_legacy():
+    """Legacy auth status endpoint — delegates to OAuth status."""
+    return oauth_status()
+
+
+@app.post("/api/auth/token")
+async def save_token_legacy(request):
+    """Legacy token save — stores manual API tokens (GitHub, Trello, etc.)."""
+    manager = _get_oauth_manager()
+    if not manager:
+        raise HTTPException(500, "OAuth not configured")
+    try:
+        body = await request.json()
+        app_id = body.get("app_id", "")
+        token = body.get("token", "")
+        if not app_id or not token:
+            raise HTTPException(400, "app_id and token required")
+        from src.integrations.oauth.base import TokenBundle
+        from datetime import datetime, timedelta, timezone
+        bundle = TokenBundle(
+            provider_id=app_id,
+            access_token=token,
+            refresh_token=None,
+            expires_at=datetime.now(tz=timezone.utc) + timedelta(days=36500),
+            scopes=[],
+            workspace_name="Manual Token",
+        )
+        manager._store.put(bundle)
+        return JSONResponse({"success": True})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.delete("/api/auth/token")
+async def delete_token_legacy(request):
+    """Legacy token delete."""
+    manager = _get_oauth_manager()
+    if not manager:
+        raise HTTPException(500, "OAuth not configured")
+    try:
+        body = await request.json()
+        app_id = body.get("app_id", "")
+        if not app_id:
+            raise HTTPException(400, "app_id required")
+        manager._store.delete(app_id)
+        return JSONResponse({"success": True})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
 # Mount static assets (JS/CSS bundles)
 if FRONTEND_DIR.exists():
     app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIR / "assets")), name="static-assets")

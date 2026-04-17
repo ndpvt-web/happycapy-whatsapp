@@ -111,7 +111,7 @@ export default function Apps() {
   useEffect(() => {
     const hash = window.location.hash;
     const params = new URLSearchParams(hash.split('?')[1] || '');
-    const success = params.get('auth_success');
+    const success = params.get('connected');
     const error = params.get('auth_error');
     if (success) {
       setAuthNotice({ type: 'success', app: success });

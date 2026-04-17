@@ -47,9 +47,11 @@ export const api = {
   models: () => fetchJSON('/models'),
   apps: () => fetchJSON('/apps'),
   restart: () => fetchJSON('/restart', { method: 'POST' }),
-  authStatus: () => fetchJSON('/auth/status'),
+  authStatus: () => fetchJSON('/oauth/status'),
   saveToken: (app_id, token, auth_type = 'token') =>
     fetchJSON('/auth/token', { method: 'POST', body: JSON.stringify({ app_id, token, auth_type }) }),
   deleteToken: (app_id) =>
     fetchJSON('/auth/token', { method: 'DELETE', body: JSON.stringify({ app_id }) }),
+  oauthDisconnect: (app_id) =>
+    fetchJSON(`/oauth/disconnect/${encodeURIComponent(app_id)}`, { method: 'DELETE' }),
 };
